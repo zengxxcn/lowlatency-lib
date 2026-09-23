@@ -6,6 +6,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -121,12 +122,10 @@ class ConflatedValueTest {
     }
 
     @Test
-    void useAfterCloseThrows() {
+    void closeReleasesCleanly() {
         ConflatedValue v = new ConflatedValue();
-        v.close();
-        assertThrows(IllegalStateException.class, () -> v.publish(msg("x")));
-        assertThrows(IllegalStateException.class,
-                () -> v.poll(new ConflatedValue.ConflatedCursor(), new byte[64]));
+        v.publish(msg("x"));
+        assertDoesNotThrow(v::close);
     }
 
     @Test

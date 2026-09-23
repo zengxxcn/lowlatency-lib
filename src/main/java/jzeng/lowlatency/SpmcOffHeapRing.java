@@ -14,6 +14,10 @@ import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
  * every consumer keeps its own {@code blockIndex} cursor and observes every message
  * (multicast — not competing consumers). Per-slot version parity: even = writing/empty,
  * odd = readable; each read adds +2 so the slot stays readable for other consumers.
+ *
+ * <p>Lifecycle is caller-owned: {@link #close()} releases the direct memory and
+ * must be called exactly once; no operation may follow it. There is
+ * intentionally no per-operation open check.
  */
 public final class SpmcOffHeapRing implements AutoCloseable {
 
@@ -22,7 +26,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
     private final int capacity;
     private final int maxPayload;
     private final int stride;
-    private volatile boolean closed;
 
     public SpmcOffHeapRing(int capacity) {
         this(capacity, OffHeapRingSupport.MAX_PAYLOAD);
@@ -53,7 +56,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
      * call once per poll/drain batch, not once per message in tight loops.
      */
     public long producerSequence() {
-        ensureOpen();
         return (long) OffHeapRingSupport.LONG_HANDLE.getAcquire(buffer, 0);
     }
 
@@ -64,7 +66,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
      * Otherwise returns {@code cursor} unchanged, preserving every-message delivery.
      */
     public long clampToOldestAlive(long cursor) {
-        ensureOpen();
         long oldestAlive = producerSequence() - capacity;
         return cursor < oldestAlive ? oldestAlive : cursor;
     }
@@ -77,7 +78,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
      * call once per poll/drain batch alongside the clamp, not per message.
      */
     public long messagesLost(long cursor) {
-        ensureOpen();
         return Math.max(0, producerSequence() - capacity - cursor);
     }
 
@@ -94,7 +94,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         if (maxLag < 0) {
             throw new IllegalArgumentException("maxLag must be >= 0, got " + maxLag);
         }
-        ensureOpen();
         long prod = producerSequence();
         if (prod - cursor > maxLag) {
             return Math.max(cursor, prod - 2);
@@ -104,7 +103,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
 
     /** Convenience copy of a heap payload (allocation-free). */
     public void write(byte[] payload) {
-        ensureOpen();
         OffHeapRingSupport.checkPayloadSize(payload.length, maxPayload);
         int base = nextSlot();
         int publish = closeSlot(base);
@@ -118,7 +116,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
     public void write(ByteBuffer src) {
         int size = src.remaining();
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
-        ensureOpen();
         int base = nextSlot();
         int publish = closeSlot(base);
         OffHeapRingSupport.setSizeRelease(buffer, base, size);
@@ -134,7 +131,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
      * allocation-free; a capturing lambda allocates per call.
      */
     public void write(int size, DirectWriter writer) {
-        ensureOpen();
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
         int base = nextSlot();
         int publish = closeSlot(base);
@@ -156,7 +152,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
      * allocation-free; a capturing lambda allocates per call.
      */
     public <E extends Flyweight> void write(EventTranslator<E> translator, E view) {
-        ensureOpen();
         OffHeapRingSupport.checkTypeFits(view, maxPayload);
         long seq = OffHeapRingSupport.getAndAddSequence(buffer);
         int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
@@ -199,7 +194,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
     }
 
     public int read(long blockIndex, byte[] dst, int dstPos) {
-        ensureOpen();
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
         int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
         if ((version & 1) == 0) {
@@ -216,7 +210,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
     }
 
     public int read(long blockIndex, ByteBuffer dst) {
-        ensureOpen();
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
         int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
         if ((version & 1) == 0) {
@@ -239,7 +232,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
      * <p>The wrapped view is valid only until the producer overwrites the slot.
      */
     public <E extends Flyweight> int read(long blockIndex, E reuse) {
-        ensureOpen();
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
         int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
         if ((version & 1) == 0) {
@@ -255,18 +247,16 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         return size;
     }
 
-    private void ensureOpen() {
-        if (closed) {
-            throw new IllegalStateException("ring is closed");
-        }
-    }
-
+    /**
+     * Releases the direct memory. Call exactly once when the ring is no
+     * longer needed. Lifecycle is caller-owned: no operation may be performed
+     * on this instance afterwards (use-after-close is undefined and may crash
+     * the JVM — there is intentionally no per-operation open check, to keep
+     * the hot path free of volatile reads and branches).
+     */
     @Override
     public void close() {
-        if (!closed) {
-            closed = true;
-            OffHeapRingSupport.free(rawOwner);
-        }
+        OffHeapRingSupport.free(rawOwner);
     }
 
     /** For tests: current published sequence (next write index). */

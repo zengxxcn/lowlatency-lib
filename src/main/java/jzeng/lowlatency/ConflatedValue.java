@@ -18,6 +18,10 @@ import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
  * <p>Seqlock protocol on a single slot (deliberately <em>not</em> the SPMC parity:
  * the producer may clobber a slot mid-copy, so readers re-validate): {@code version}
  * even = stable, odd = writer active; each publish adds +2.
+ *
+ * <p>Lifecycle is caller-owned: {@link #close()} releases the direct memory and
+ * must be called exactly once; no operation may follow it. There is
+ * intentionally no per-operation open check.
  */
 public final class ConflatedValue implements AutoCloseable {
 
@@ -32,7 +36,6 @@ public final class ConflatedValue implements AutoCloseable {
 
     private final ByteBuffer buffer;
     private final ByteBuffer rawOwner;
-    private volatile boolean closed;
 
     public ConflatedValue() {
         OffHeapRingSupport.Region region = OffHeapRingSupport.allocate(1, OffHeapRingSupport.MAX_PAYLOAD);
@@ -42,7 +45,6 @@ public final class ConflatedValue implements AutoCloseable {
 
     /** Convenience copy of a heap payload (unconditional overwrite, allocation-free). */
     public void publish(byte[] payload) {
-        ensureOpen();
         OffHeapRingSupport.checkPayloadSize(payload.length);
         int v0 = beginPublish();
         OffHeapRingSupport.setSizeRelease(buffer, BASE, payload.length);
@@ -54,7 +56,6 @@ public final class ConflatedValue implements AutoCloseable {
     public void publish(ByteBuffer src) {
         int size = src.remaining();
         OffHeapRingSupport.checkPayloadSize(size);
-        ensureOpen();
         int v0 = beginPublish();
         OffHeapRingSupport.setSizeRelease(buffer, BASE, size);
         OffHeapRingSupport.copyFromBuffer(buffer, BASE + OFF_DATA, src, size);
@@ -69,7 +70,6 @@ public final class ConflatedValue implements AutoCloseable {
      * allocation-free; a capturing lambda allocates per call.
      */
     public void publish(int size, DirectWriter writer) {
-        ensureOpen();
         OffHeapRingSupport.checkPayloadSize(size);
         int v0 = beginPublish();
         OffHeapRingSupport.setSizeRelease(buffer, BASE, size);
@@ -101,7 +101,6 @@ public final class ConflatedValue implements AutoCloseable {
     }
 
     public int poll(ConflatedCursor cursor, byte[] dst, int dstPos) {
-        ensureOpen();
         int v0 = OffHeapRingSupport.getVersionAcquire(buffer, BASE);
         if ((v0 & 1) == 1 || v0 == cursor.lastSeenVersion) {
             return -1;
@@ -119,7 +118,6 @@ public final class ConflatedValue implements AutoCloseable {
     }
 
     public int poll(ConflatedCursor cursor, ByteBuffer dst) {
-        ensureOpen();
         int v0 = OffHeapRingSupport.getVersionAcquire(buffer, BASE);
         if ((v0 & 1) == 1 || v0 == cursor.lastSeenVersion) {
             return -1;
@@ -136,17 +134,15 @@ public final class ConflatedValue implements AutoCloseable {
         return size;
     }
 
-    private void ensureOpen() {
-        if (closed) {
-            throw new IllegalStateException("value is closed");
-        }
-    }
-
+    /**
+     * Releases the direct memory. Call exactly once when the value is no
+     * longer needed. Lifecycle is caller-owned: no operation may be performed
+     * on this instance afterwards (use-after-close is undefined and may crash
+     * the JVM — there is intentionally no per-operation open check, to keep
+     * the hot path free of volatile reads and branches).
+     */
     @Override
     public void close() {
-        if (!closed) {
-            closed = true;
-            OffHeapRingSupport.free(rawOwner);
-        }
+        OffHeapRingSupport.free(rawOwner);
     }
 }

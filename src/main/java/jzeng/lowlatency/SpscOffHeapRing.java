@@ -15,6 +15,10 @@ import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
  * already false but the version is still odd, a read is in progress and the write
  * fails with {@link SpscWriteResult#ERROR}. The reader CASes {@code unread} to
  * consume each slot exactly once.
+ *
+ * <p>Lifecycle is caller-owned: {@link #close()} releases the direct memory and
+ * must be called exactly once; no operation may follow it. There is
+ * intentionally no per-operation open check.
  */
 public final class SpscOffHeapRing implements AutoCloseable {
 
@@ -23,7 +27,6 @@ public final class SpscOffHeapRing implements AutoCloseable {
     private final int capacity;
     private final int maxPayload;
     private final int stride;
-    private volatile boolean closed;
 
     public SpscOffHeapRing(int capacity) {
         this(capacity, OffHeapRingSupport.MAX_PAYLOAD);
@@ -49,7 +52,6 @@ public final class SpscOffHeapRing implements AutoCloseable {
 
     /** Convenience copy of a heap payload (allocation-free). */
     public SpscWriteResult write(byte[] payload) {
-        ensureOpen();
         OffHeapRingSupport.checkPayloadSize(payload.length, maxPayload);
         long seq = claimSeqForWrite();
         if (seq < 0) {
@@ -66,7 +68,6 @@ public final class SpscOffHeapRing implements AutoCloseable {
     public SpscWriteResult write(ByteBuffer src) {
         int size = src.remaining();
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
-        ensureOpen();
         long seq = claimSeqForWrite();
         if (seq < 0) {
             return SpscWriteResult.ERROR;
@@ -88,7 +89,6 @@ public final class SpscOffHeapRing implements AutoCloseable {
      *         read is still in progress on the target slot.
      */
     public SpscWriteResult write(int size, DirectWriter writer) {
-        ensureOpen();
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
         long seq = claimSeqForWrite();
         if (seq < 0) {
@@ -114,7 +114,6 @@ public final class SpscOffHeapRing implements AutoCloseable {
      *         read is still in progress on the target slot.
      */
     public <E extends Flyweight> SpscWriteResult write(EventTranslator<E> translator, E view) {
-        ensureOpen();
         OffHeapRingSupport.checkTypeFits(view, maxPayload);
         long seq = claimSeqForWrite();
         if (seq < 0) {
@@ -176,7 +175,6 @@ public final class SpscOffHeapRing implements AutoCloseable {
     }
 
     public int read(long blockIndex, byte[] dst, int dstPos) {
-        ensureOpen();
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
         int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
         if ((version & 1) == 0) {
@@ -202,7 +200,6 @@ public final class SpscOffHeapRing implements AutoCloseable {
     }
 
     public int read(long blockIndex, ByteBuffer dst) {
-        ensureOpen();
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
         int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
         if ((version & 1) == 0) {
@@ -235,7 +232,6 @@ public final class SpscOffHeapRing implements AutoCloseable {
      * <p>The wrapped view is valid only until the producer overwrites the slot.
      */
     public <E extends Flyweight> int read(long blockIndex, E reuse) {
-        ensureOpen();
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
         int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
         if ((version & 1) == 0) {
@@ -255,17 +251,15 @@ public final class SpscOffHeapRing implements AutoCloseable {
         return size;
     }
 
-    private void ensureOpen() {
-        if (closed) {
-            throw new IllegalStateException("ring is closed");
-        }
-    }
-
+    /**
+     * Releases the direct memory. Call exactly once when the ring is no
+     * longer needed. Lifecycle is caller-owned: no operation may be performed
+     * on this instance afterwards (use-after-close is undefined and may crash
+     * the JVM — there is intentionally no per-operation open check, to keep
+     * the hot path free of volatile reads and branches).
+     */
     @Override
     public void close() {
-        if (!closed) {
-            closed = true;
-            OffHeapRingSupport.free(rawOwner);
-        }
+        OffHeapRingSupport.free(rawOwner);
     }
 }
