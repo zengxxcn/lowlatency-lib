@@ -80,6 +80,13 @@ class SpmcOffHeapRingTest {
     }
 
     @Test
+    void rejectsNonPowerOfTwoCapacity() {
+        assertThrows(IllegalArgumentException.class, () -> new SpmcOffHeapRing(3));
+        assertThrows(IllegalArgumentException.class, () -> new SpmcOffHeapRing(1000));
+        assertThrows(IllegalArgumentException.class, () -> new SpmcOffHeapRing(6, 128));
+    }
+
+    @Test
     void zeroCopyWriterCallback() {
         try (SpmcOffHeapRing ring = new SpmcOffHeapRing(8)) {
             byte[] payload = msg("cb");

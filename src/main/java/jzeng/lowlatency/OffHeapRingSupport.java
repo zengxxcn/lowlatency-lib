@@ -47,8 +47,8 @@ final class OffHeapRingSupport {
     }
 
     static ByteBuffer allocate(int capacity, int maxPayload) {
-        if (capacity <= 0) {
-            throw new IllegalArgumentException("capacity must be > 0, got " + capacity);
+        if (capacity <= 0 || (capacity & (capacity - 1)) != 0) {
+            throw new IllegalArgumentException("capacity must be a power of 2, got " + capacity);
         }
         if (maxPayload <= 0) {
             throw new IllegalArgumentException("maxPayload must be > 0, got " + maxPayload);
@@ -74,7 +74,9 @@ final class OffHeapRingSupport {
     }
 
     static int slotBase(long sequence, int capacity, int stride) {
-        long slot = Long.remainderUnsigned(sequence, capacity);
+        // Power-of-2 capacity (enforced in allocate): bitmask == unsigned
+        // remainder for all sequences, 1 cycle instead of a 64-bit division.
+        long slot = sequence & (capacity - 1L);
         long base = (long) HEADER_SIZE + slot * stride;
         return (int) base;
     }

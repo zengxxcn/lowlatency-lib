@@ -57,6 +57,12 @@ class SpscOffHeapRingTest {
     }
 
     @Test
+    void rejectsNonPowerOfTwoCapacity() {
+        assertThrows(IllegalArgumentException.class, () -> new SpscOffHeapRing(3));
+        assertThrows(IllegalArgumentException.class, () -> new SpscOffHeapRing(1000));
+    }
+
+    @Test
     void sequentialWritesAndReads() {
         try (SpscOffHeapRing ring = new SpscOffHeapRing(4)) {
             for (int i = 0; i < 8; i++) {
