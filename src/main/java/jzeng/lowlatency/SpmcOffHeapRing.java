@@ -18,6 +18,7 @@ import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
 public final class SpmcOffHeapRing implements AutoCloseable {
 
     private final ByteBuffer buffer;
+    private final ByteBuffer rawOwner;
     private final int capacity;
     private final int maxPayload;
     private final int stride;
@@ -28,7 +29,9 @@ public final class SpmcOffHeapRing implements AutoCloseable {
     }
 
     public SpmcOffHeapRing(int capacity, int maxPayload) {
-        this.buffer = OffHeapRingSupport.allocate(capacity, maxPayload);
+        OffHeapRingSupport.Region region = OffHeapRingSupport.allocate(capacity, maxPayload);
+        this.buffer = region.slice;
+        this.rawOwner = region.raw;
         this.capacity = capacity;
         this.maxPayload = maxPayload;
         this.stride = OffHeapRingSupport.slotStride(maxPayload);
@@ -262,7 +265,7 @@ public final class SpmcOffHeapRing implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
-            OffHeapRingSupport.free(buffer);
+            OffHeapRingSupport.free(rawOwner);
         }
     }
 

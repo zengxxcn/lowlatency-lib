@@ -8,16 +8,23 @@ import java.nio.ByteOrder;
 /**
  * Shared off-heap layout and atomic accessors.
  *
- * <p>Single {@code allocateDirect} region:
+ * <p>Single {@code allocateDirect} region (base 64-aligned via an aligned slice):
  * <pre>
  * HEADER (64 B): seq long @0, pad 8..63
- * SLOT s (128 B): base = 64 + s*128
+ * SLOT s (stride B, stride % 64 == 0): base = 64 + s*stride
  *   +0  version int (even = writing/empty, odd = readable)
- *   +4  size    int (0..64)
+ *   +4  size    int (0..maxPayload)
  *   +8  unread  int (SPSC only, 0/1; SPMC reserved)
  *   +12..63     padding
- *   +64..127    payload (64 B)
+ *   +64..       payload (maxPayload B, zero-padded to a 64B multiple)
  * </pre>
+ *
+ * <p>The stride is a multiple of 64 so adjacent slots never share a cache
+ * line: the producer writing slot {@code s+1}'s header cannot invalidate a
+ * line the consumer is reading for slot {@code s} (false sharing). Offsets
+ * are relative to the aligned slice, so all hot fields stay line-aligned in
+ * absolute terms too.
+ *
  *
  * <p>Memory-ordering map: {@code getAcquire} for acquire-loads,
  * {@code setRelease} for release-stores, {@code getAndAdd} (volatile, stronger —
@@ -42,30 +49,93 @@ final class OffHeapRingSupport {
     private OffHeapRingSupport() {
     }
 
-    static ByteBuffer allocate(int capacity) {
-        return allocate(capacity, MAX_PAYLOAD);
-    }
-
-    static ByteBuffer allocate(int capacity, int maxPayload) {
+    static Region allocate(int capacity, int maxPayload) {
         if (capacity <= 0 || (capacity & (capacity - 1)) != 0) {
             throw new IllegalArgumentException("capacity must be a power of 2, got " + capacity);
         }
         if (maxPayload <= 0) {
             throw new IllegalArgumentException("maxPayload must be > 0, got " + maxPayload);
         }
-        long stride = slotStride(maxPayload);
+        int stride = slotStride(maxPayload);
         long total = (long) HEADER_SIZE + (long) capacity * stride;
         if (total > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("ring too large: " + total + " bytes");
         }
-        ByteBuffer buf = ByteBuffer.allocateDirect((int) total);
-        // Zero-init is guaranteed by allocateDirect.
-        return buf;
+        // Over-allocate so the working slice can start on a 64B boundary
+        // (allocateDirect only guarantees ~8B alignment). One-off cost at
+        // construction; the hot path touches only the slice.
+        ByteBuffer raw = ByteBuffer.allocateDirect((int) total + 63);
+        int pad = 0;
+        try {
+            pad = alignPad(addressOf(raw));
+        } catch (Exception ignored) {
+            // Internals inaccessible: correct but possibly unaligned.
+        }
+        raw.limit(pad + (int) total);
+        raw.position(pad);
+        return new Region(raw.slice(), raw);
     }
 
-    /** Slot stride for a max payload: 64B header region + payload, 8-aligned. */
+    /**
+     * An allocated ring region. {@code slice} is the 64-aligned working view
+     * (all layout offsets are relative to it); {@code raw} is the
+     * over-allocated owner — retain it for the ring's lifetime so the
+     * cleaner cannot free the memory out from under the slice, and free it
+     * (not the slice) on close.
+     */
+    static final class Region {
+        final ByteBuffer slice;
+        final ByteBuffer raw;
+
+        Region(ByteBuffer slice, ByteBuffer raw) {
+            this.slice = slice;
+            this.raw = raw;
+        }
+    }
+
+    /** Bytes to skip from {@code address} to reach a 64B boundary (0..63). */
+    static int alignPad(long address) {
+        return (int) ((64 - (address & 63)) & 63);
+    }
+
+    /** Absolute memory address of a direct buffer (construction-time use). */
+    static long addressOf(ByteBuffer buf) {
+        if (ADDRESS_OFFSET == -1L || UNSAFE == null) {
+            throw new IllegalStateException("direct buffer address inaccessible");
+        }
+        return UNSAFE.getLong(buf, ADDRESS_OFFSET);
+    }
+
+    private static final sun.misc.Unsafe UNSAFE = loadUnsafe();
+    private static final long ADDRESS_OFFSET = loadAddressOffset();
+
+    private static sun.misc.Unsafe loadUnsafe() {
+        try {
+            var field = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+            field.setAccessible(true);
+            return (sun.misc.Unsafe) field.get(null);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static long loadAddressOffset() {
+        try {
+            if (UNSAFE == null) {
+                return -1L;
+            }
+            return UNSAFE.objectFieldOffset(java.nio.Buffer.class.getDeclaredField("address"));
+        } catch (Exception e) {
+            return -1L;
+        }
+    }
+
+    /**
+     * Slot stride for a max payload: 64B header region + payload, rounded up
+     * to a 64B (cache-line) multiple so adjacent slots never share a line.
+     */
     static int slotStride(int maxPayload) {
-        return (OFF_DATA + maxPayload + 7) & ~7;
+        return (OFF_DATA + maxPayload + 63) & ~63;
     }
 
     /** Absolute slot base for a (possibly wrapped) producer/consumer sequence. */

@@ -5,9 +5,11 @@ Very fast lock-free structures using seqlock and per-slot versioning.
 ## Layout (fully off-heap)
 
 One direct allocation: `64 B header + capacity × stride`, where
-`stride = roundUp8(64 + maxPayload)` — 128 B at the default 64 B max payload
+`stride = roundUp64(64 + maxPayload)` — 128 B at the default 64 B max payload
 (wider when the ring is sized for a larger `Flyweight` type, e.g. 320 B stride
-for the 256 B worst-case price ladder).
+for the 256 B worst-case price ladder). The stride is always a multiple of 64
+and the region base is 64-aligned, so adjacent slots never share a cache line
+(no false sharing between the producer's slot and the consumer's neighbour).
 
 ```
 HEADER (64 B): producer sequence long @0, pad 8..63

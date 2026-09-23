@@ -31,10 +31,13 @@ public final class ConflatedValue implements AutoCloseable {
     private static final int BASE = OffHeapRingSupport.HEADER_SIZE; // single slot 0
 
     private final ByteBuffer buffer;
+    private final ByteBuffer rawOwner;
     private volatile boolean closed;
 
     public ConflatedValue() {
-        this.buffer = OffHeapRingSupport.allocate(1);
+        OffHeapRingSupport.Region region = OffHeapRingSupport.allocate(1, OffHeapRingSupport.MAX_PAYLOAD);
+        this.buffer = region.slice;
+        this.rawOwner = region.raw;
     }
 
     /** Convenience copy of a heap payload (unconditional overwrite, allocation-free). */
@@ -143,7 +146,7 @@ public final class ConflatedValue implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
-            OffHeapRingSupport.free(buffer);
+            OffHeapRingSupport.free(rawOwner);
         }
     }
 }
