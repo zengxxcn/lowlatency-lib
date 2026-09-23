@@ -24,6 +24,7 @@
     <junit.version>5.11.3</junit.version>
     <jmh.version>1.37</jmh.version>
     <disruptor.version>4.0.0</disruptor.version>
+    <agrona.version>2.6.1</agrona.version>
   </properties>
 
   <dependencies>
@@ -37,6 +38,11 @@
       <groupId>com.lmax</groupId>
       <artifactId>disruptor</artifactId>
       <version>${disruptor.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.agrona</groupId>
+      <artifactId>agrona</artifactId>
+      <version>${agrona.version}</version>
     </dependency>
     <dependency>
       <groupId>org.openjdk.jmh</groupId>

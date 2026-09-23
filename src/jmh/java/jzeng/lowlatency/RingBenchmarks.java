@@ -14,6 +14,13 @@ import com.lmax.disruptor.RingBuffer;
 import com.lmax.disruptor.Sequence;
 import com.lmax.disruptor.YieldingWaitStrategy;
 
+import org.agrona.concurrent.MessageHandler;
+import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.ringbuffer.OneToOneRingBuffer;
+import org.agrona.concurrent.ringbuffer.RingBufferDescriptor;
+
+import java.nio.ByteBuffer;
+
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
@@ -193,6 +200,76 @@ public class RingBenchmarks {
         c.cursor++;
         g.consumed.set(c.cursor - 1);
         return n;
+    }
+
+    // ---------------- Agrona OneToOneRingBuffer 1P x 1C ----------------
+    // Same test shape as spsc1p1c (single producer, single consumer, 32 B
+    // payload) backed by Agrona's OneToOneRingBuffer over off-heap memory.
+    // Framing differs: 8 B header + payload (8-aligned), so a 32 B message is
+    // one 40 B record. Capacity must be pow2 bytes: 65536 usable bytes hold
+    // 1638 records vs our 1024 slots — documented depth difference, same
+    // per-message work (fill 32 B, copy 32 B on consume).
+
+    @State(Scope.Group)
+    public static class AgronaSpsc {
+        static final int AGRONA_CAPACITY = 65536; // pow2 usable bytes
+        final OneToOneRingBuffer rb;
+        final UnsafeBuffer src;
+
+        public AgronaSpsc() {
+            rb = new OneToOneRingBuffer(new UnsafeBuffer(
+                    ByteBuffer.allocateDirect(AGRONA_CAPACITY + RingBufferDescriptor.TRAILER_LENGTH)));
+            src = new UnsafeBuffer(new byte[PAYLOAD]);
+        }
+    }
+
+    @State(Scope.Thread)
+    public static class AgronaConsumer {
+        final byte[] buf = new byte[PAYLOAD];
+        int lastSize;
+        // Allocated once per thread (field init); the benchmark itself never allocates.
+        final MessageHandler handler = (msgTypeId, buffer, index, length) -> {
+            buffer.getBytes(index, buf, 0, length);
+            lastSize = length;
+        };
+    }
+
+    @Benchmark
+    @Group("agronaSpsc1p1c")
+    @GroupThreads(1)
+    public void agronaSpscProducer(AgronaSpsc g) {
+        for (int i = 0; i < PAYLOAD; i++) {
+            g.src.putByte(i, (byte) i);
+        }
+        if (!g.rb.write(1, g.src, 0, PAYLOAD)) {
+            // Backpressure with escape hatch (same shape as spsc1p1c): Agrona
+            // reports full instead of consuming a sequence, so retry; a live
+            // consumer drains every ~30 ns, so 10 ms means the iteration is over.
+            long spins = 0;
+            long start = System.nanoTime();
+            while (!g.rb.write(1, g.src, 0, PAYLOAD)) {
+                if (((++spins & 0x3FF) == 0) && (System.nanoTime() - start) > 10_000_000L) {
+                    return;
+                }
+            }
+        }
+    }
+
+    @Benchmark
+    @Group("agronaSpsc1p1c")
+    @GroupThreads(1)
+    public int agronaSpscConsumer(AgronaSpsc g, AgronaConsumer c) {
+        if (g.rb.read(c.handler, 1) == 0) {
+            // Starved: spin with escape hatch (see spinRead).
+            long spins = 0;
+            long start = System.nanoTime();
+            while (g.rb.read(c.handler, 1) == 0) {
+                if (((++spins & 0x3FF) == 0) && (System.nanoTime() - start) > 10_000_000L) {
+                    return -1; // iteration over: one phantom op per thread per phase
+                }
+            }
+        }
+        return c.lastSize;
     }
 
     // ---------------- Disruptor 1P x 1C / 1P x 3C ----------------

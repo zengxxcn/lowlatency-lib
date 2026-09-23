@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.fail;
 
 class ConflatedValueTest {
 
@@ -118,6 +119,85 @@ class ConflatedValueTest {
             assertThrows(IllegalArgumentException.class, () -> v.publish(new byte[65]));
             assertThrows(IllegalArgumentException.class, () -> v.publish(65, (buf, off, n) -> {
             }));
+        }
+    }
+
+    @Test
+    void typedPublishPollRoundTrip() {
+        try (ConflatedValue v = new ConflatedValue(TestOrderEvent.ENCODED)) {
+            assertEquals(TestOrderEvent.ENCODED, v.maxPayload());
+            TestOrderEvent view = new TestOrderEvent();
+            v.publish((TestOrderEvent e, long seq) -> e.set(2002L, 9, 3100L), view);
+            TestOrderEvent reuse = new TestOrderEvent();
+            ConflatedValue.ConflatedCursor cursor = new ConflatedValue.ConflatedCursor();
+            assertEquals(TestOrderEvent.ENCODED, v.poll(cursor, reuse));
+            assertEquals(2002L, reuse.orderId());
+            assertEquals(9, reuse.qty());
+            assertEquals(3100L, reuse.price());
+            // No new publish: second poll with the same cursor misses.
+            assertEquals(-1, v.poll(cursor, reuse));
+        }
+    }
+
+    @Test
+    void oversizeTypeRejected() {
+        try (ConflatedValue v = new ConflatedValue()) {
+            TestPriceLadder view = new TestPriceLadder();
+            assertThrows(IllegalArgumentException.class,
+                    () -> v.publish((TestPriceLadder e, long seq) -> e.setDepth(8), view));
+        }
+    }
+
+    @Test
+    void variableDepthLadderRoundTrip() {
+        try (ConflatedValue v = new ConflatedValue(TestPriceLadder.MAX_ENCODED)) {
+            TestPriceLadder view = new TestPriceLadder();
+            v.publish((TestPriceLadder e, long seq) -> {
+                e.setSymbol("EURUSD");
+                e.setMarket("LMAX");
+                e.setEventId(9001L);
+                e.setTimestampNs(1_720_000_000_000_000_002L);
+                e.setDepth(2);
+                e.setLevel(0, 108100L, 108103L, 5_000_000L);
+                e.setLevel(1, 108099L, 108104L, 6_000_000L);
+            }, view);
+            TestPriceLadder reuse = new TestPriceLadder();
+            ConflatedValue.ConflatedCursor cursor = new ConflatedValue.ConflatedCursor();
+            assertEquals(TestPriceLadder.HEADER + 2 * TestPriceLadder.ENTRY, v.poll(cursor, reuse));
+            assertEquals("EURUSD", reuse.symbol());
+            assertEquals("LMAX", reuse.market());
+            assertEquals(9001L, reuse.eventId());
+            assertEquals(2, reuse.depth());
+            assertEquals(108099L, reuse.levelBid(1));
+            assertEquals(108104L, reuse.levelAsk(1));
+            assertEquals(6_000_000L, reuse.levelQty(1));
+        }
+    }
+
+    @Test
+    void typedHotPathAllocatesNoHeapGarbage() {
+        com.sun.management.ThreadMXBean mx =
+                (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+        org.junit.jupiter.api.Assumptions.assumeTrue(mx.isThreadAllocatedMemorySupported());
+        mx.setThreadAllocatedMemoryEnabled(true);
+        try (ConflatedValue v = new ConflatedValue(TestOrderEvent.ENCODED)) {
+            TestOrderEvent view = new TestOrderEvent();
+            TestOrderEvent reuse = new TestOrderEvent();
+            ConflatedValue.ConflatedCursor cursor = new ConflatedValue.ConflatedCursor();
+            EventTranslator<TestOrderEvent> translator = (e, seq) -> e.set(seq, 1, 2L);
+            long me = Thread.currentThread().getId();
+            for (int w = 0; w < 10; w++) {
+                long b = mx.getThreadAllocatedBytes(me);
+                for (long i = 0; i < 100_000; i++) {
+                    v.publish(translator, view);
+                    cursor.lastSeenVersion = -1; // force re-poll every iteration
+                    v.poll(cursor, reuse);
+                }
+                if (mx.getThreadAllocatedBytes(me) - b == 0) {
+                    return;
+                }
+            }
+            fail("typed hot path keeps allocating heap garbage");
         }
     }
 

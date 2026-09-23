@@ -36,16 +36,29 @@ public final class ConflatedValue implements AutoCloseable {
 
     private final ByteBuffer buffer;
     private final ByteBuffer rawOwner;
+    private final int maxPayload;
+    /** Producer-confined publish counter, lent to translators as the sequence. */
+    private long publishSequence;
 
     public ConflatedValue() {
-        OffHeapRingSupport.Region region = OffHeapRingSupport.allocate(1, OffHeapRingSupport.MAX_PAYLOAD);
+        this(OffHeapRingSupport.MAX_PAYLOAD);
+    }
+
+    public ConflatedValue(int maxPayload) {
+        OffHeapRingSupport.Region region = OffHeapRingSupport.allocate(1, maxPayload);
         this.buffer = region.slice;
         this.rawOwner = region.raw;
+        this.maxPayload = maxPayload;
+    }
+
+    /** Maximum payload bytes per publish for this value (instance property). */
+    public int maxPayload() {
+        return maxPayload;
     }
 
     /** Convenience copy of a heap payload (unconditional overwrite, allocation-free). */
     public void publish(byte[] payload) {
-        OffHeapRingSupport.checkPayloadSize(payload.length);
+        OffHeapRingSupport.checkPayloadSize(payload.length, maxPayload);
         int v0 = beginPublish();
         OffHeapRingSupport.setSizeRelease(buffer, BASE, payload.length);
         OffHeapRingSupport.copyFrom(buffer, BASE + OFF_DATA, payload, 0, payload.length);
@@ -55,7 +68,7 @@ public final class ConflatedValue implements AutoCloseable {
     /** Convenience copy from a {@link ByteBuffer} (consumes {@code remaining()} bytes, allocation-free). */
     public void publish(ByteBuffer src) {
         int size = src.remaining();
-        OffHeapRingSupport.checkPayloadSize(size);
+        OffHeapRingSupport.checkPayloadSize(size, maxPayload);
         int v0 = beginPublish();
         OffHeapRingSupport.setSizeRelease(buffer, BASE, size);
         OffHeapRingSupport.copyFromBuffer(buffer, BASE + OFF_DATA, src, size);
@@ -70,16 +83,42 @@ public final class ConflatedValue implements AutoCloseable {
      * allocation-free; a capturing lambda allocates per call.
      */
     public void publish(int size, DirectWriter writer) {
-        OffHeapRingSupport.checkPayloadSize(size);
+        OffHeapRingSupport.checkPayloadSize(size, maxPayload);
         int v0 = beginPublish();
         OffHeapRingSupport.setSizeRelease(buffer, BASE, size);
         writer.writeTo(buffer, BASE + OFF_DATA, size);
         endPublish(v0);
     }
 
+    /**
+     * Typed publish mirroring the {@code DirectWriter} overload: wraps
+     * {@code view} over the slot, translates, publishes. The translator
+     * receives a producer-confined sequence (0, 1, 2, ... per publish).
+     *
+     * <p>Pass a non-capturing lambda, method reference, or shared instance to
+     * stay allocation-free; a capturing lambda allocates per call.
+     */
+    public <E extends Flyweight> void publish(EventTranslator<E> translator, E view) {
+        OffHeapRingSupport.checkTypeFits(view, maxPayload);
+        int v0 = beginPublish();
+        view.wrap(buffer, BASE + OFF_DATA, maxPayload);
+        final int size;
+        try {
+            translator.translateTo(view, publishSequence - 1);
+            size = OffHeapRingSupport.checkedEncodedSize(view, maxPayload);
+        } catch (RuntimeException | Error e) {
+            // Restore stable (even) so readers don't stall on a dead writer mark.
+            INT_HANDLE.setRelease(buffer, BASE + OFF_VERSION, v0);
+            throw e;
+        }
+        OffHeapRingSupport.setSizeRelease(buffer, BASE, size);
+        endPublish(v0);
+    }
+
     /** Marks the slot writing (odd); returns the pre-publish version. */
     private int beginPublish() {
         int v0 = OffHeapRingSupport.getVersionAcquire(buffer, BASE);
+        publishSequence++;
         INT_HANDLE.setRelease(buffer, BASE + OFF_VERSION, v0 + 1);
         return v0;
     }
@@ -129,6 +168,32 @@ public final class ConflatedValue implements AutoCloseable {
         OffHeapRingSupport.copyToBuffer(buffer, BASE + OFF_DATA, dst, size);
         if (OffHeapRingSupport.getVersionAcquire(buffer, BASE) != v0) {
             return -1;
+        }
+        cursor.lastSeenVersion = v0;
+        return size;
+    }
+
+    /**
+     * Typed poll: wraps {@code reuse} over the latest value iff a newer
+     * complete publish exists since {@code cursor}'s last success. Zero-copy —
+     * no bytes moved, no objects created.
+     *
+     * @return payload size, or -1 if no new data, the writer is mid-publish,
+     *         or the copy was torn (cursor not advanced and the view must be
+     *         discarded in all -1 cases).
+     */
+    public <E extends Flyweight> int poll(ConflatedCursor cursor, E reuse) {
+        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, BASE);
+        if ((v0 & 1) == 1 || v0 == cursor.lastSeenVersion) {
+            return -1;
+        }
+        int size = OffHeapRingSupport.getSizeAcquire(buffer, BASE);
+        if (size < 0 || size > maxPayload) {
+            throw new IllegalStateException("corrupt slot size " + size);
+        }
+        reuse.wrap(buffer, BASE + OFF_DATA, size);
+        if (OffHeapRingSupport.getVersionAcquire(buffer, BASE) != v0) {
+            return -1; // torn by a concurrent publish; retry later
         }
         cursor.lastSeenVersion = v0;
         return size;
