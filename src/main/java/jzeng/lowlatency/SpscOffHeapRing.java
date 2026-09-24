@@ -2,19 +2,21 @@ package jzeng.lowlatency;
 
 import java.nio.ByteBuffer;
 
-import static jzeng.lowlatency.OffHeapRingSupport.INT_HANDLE;
 import static jzeng.lowlatency.OffHeapRingSupport.OFF_DATA;
-import static jzeng.lowlatency.OffHeapRingSupport.OFF_UNREAD;
 import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
 
 /**
  * Single-producer / single-consumer exactly-once ring, fully off-heap.
  *
- * <p>Each slot carries an {@code unread} flag. The writer CASes {@code unread}
- * The writer CASes {@code unread} true→false to claim the slot; if the flag was
- * already false but the version is still odd, a read is in progress and the write
- * fails with {@link SpscWriteResult#ERROR}. The reader CASes {@code unread} to
- * consume each slot exactly once.
+ * <p>No per-slot claim flag and no atomics on the hot path. Strict version
+ * parity is the whole protocol: the producer touches only even slots and
+ * publishes even→odd; the consumer touches only odd slots and releases
+ * odd→even. A claim that observes an odd version means the consumer hasn't
+ * released the slot (backlog == capacity), so the write fails with
+ * {@link SpscWriteResult#ERROR} instead of overwriting — lossless
+ * backpressure, no CAS, no fetch-add. The producer sequence is a plain
+ * producer-confined field; exactly-once follows from single-reader cursor
+ * order plus no-overwrite.
  *
  * <p>Lifecycle is caller-owned: {@link #close()} releases the direct memory and
  * must be called exactly once; no operation may follow it. There is
@@ -27,6 +29,19 @@ public final class SpscOffHeapRing implements AutoCloseable {
     private final int capacity;
     private final int maxPayload;
     private final int stride;
+    /**
+     * Next sequence to publish. Deliberately a separate object, not a field:
+     * the consumer dereferences the ring (buffer/capacity/stride) on every
+     * read, so a producer-mutated sequence on the ring would share its cache
+     * line and bounce it every message. This holder is only ever touched by
+     * the producer — its line stays producer-local.
+     */
+    private final ProducerSequence producer = new ProducerSequence();
+
+    /** Producer-confined sequence (SPSC contract): no atomic needed. */
+    private static final class ProducerSequence {
+        long next;
+    }
 
     public SpscOffHeapRing(int capacity) {
         this(capacity, OffHeapRingSupport.MAX_PAYLOAD);
@@ -85,8 +100,8 @@ public final class SpscOffHeapRing implements AutoCloseable {
      * <p>Pass a non-capturing lambda, method reference, or shared instance to stay
      * allocation-free; a capturing lambda allocates per call.
      *
-     * @return {@link SpscWriteResult#SUCCESS}, or {@link SpscWriteResult#ERROR} when a
-     *         read is still in progress on the target slot.
+     * @return {@link SpscWriteResult#SUCCESS}, or {@link SpscWriteResult#ERROR} when the
+     *         target slot has not been released by the consumer (ring full).
      */
     public SpscWriteResult write(int size, DirectWriter writer) {
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
@@ -96,12 +111,7 @@ public final class SpscOffHeapRing implements AutoCloseable {
         }
         int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
         OffHeapRingSupport.setSizeRelease(buffer, base, size);
-        try {
-            writer.writeTo(buffer, base + OFF_DATA, size);
-        } catch (RuntimeException | Error e) {
-            abortSlot(base);
-            throw e;
-        }
+        writer.writeTo(buffer, base + OFF_DATA, size);
         publishSlot(base);
         return SpscWriteResult.SUCCESS;
     }
@@ -110,8 +120,8 @@ public final class SpscOffHeapRing implements AutoCloseable {
      * Typed write mirroring the {@code DirectWriter} overload: claims the slot,
      * wraps {@code view} over it, translates, publishes.
      *
-     * @return {@link SpscWriteResult#SUCCESS}, or {@link SpscWriteResult#ERROR} when a
-     *         read is still in progress on the target slot.
+     * @return {@link SpscWriteResult#SUCCESS}, or {@link SpscWriteResult#ERROR} when the
+     *         target slot has not been released by the consumer (ring full).
      */
     public <E extends Flyweight> SpscWriteResult write(EventTranslator<E> translator, E view) {
         OffHeapRingSupport.checkTypeFits(view, maxPayload);
@@ -121,48 +131,41 @@ public final class SpscOffHeapRing implements AutoCloseable {
         }
         int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
         view.wrap(buffer, base + OFF_DATA, maxPayload);
-        final int size;
-        try {
-            translator.translateTo(view, seq);
-            size = OffHeapRingSupport.checkedEncodedSize(view, maxPayload);
-        } catch (RuntimeException | Error e) {
-            abortSlot(base);
-            throw e;
-        }
+        // Translator failure propagates with the version untouched: the slot
+        // is still even (free) and `next` unadvanced, so no abort is needed.
+        translator.translateTo(view, seq);
+        int size = OffHeapRingSupport.checkedEncodedSize(view, maxPayload);
         OffHeapRingSupport.setSizeRelease(buffer, base, size);
         publishSlot(base);
         return SpscWriteResult.SUCCESS;
     }
 
     /**
-     * Claims the next sequence (unread true→false on its slot); returns the
-     * sequence, or -1 when a read is still in progress on the target slot
-     * (version odd).
+     * Claims the next sequence: returns it when its slot is even (free), or -1
+     * when odd (consumer hasn't released it — backlog == capacity).
+     *
+     * <p>No CAS: strict alternation means an even slot can only be freed by the
+     * consumer's release of the previous generation, and the single producer is
+     * the only writer of even slots — the acquire-load is the whole gate.
      */
     private long claimSeqForWrite() {
-        long seq = OffHeapRingSupport.getAndAddSequence(buffer);
+        long seq = producer.next;
         int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
-        boolean claimed = (boolean) INT_HANDLE.compareAndSet(buffer, base + OFF_UNREAD, 1, 0);
-        if (!claimed) {
-            int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
-            if ((version & 1) == 1) {
-                // Reader holds the slot (still odd) — must not overwrite.
-                return -1;
-            }
-            // Version even: slot is free (never written, or already consumed).
+        if ((OffHeapRingSupport.getVersionAcquire(buffer, base) & 1) == 1) {
+            return -1;
         }
         return seq;
     }
 
-    /** Marks the slot unread and publishes (even→odd) for the single reader. */
+    /**
+     * Publishes a claimed slot (even→odd) and advances the producer sequence.
+     * The version is still even — only this producer writes even slots and the
+     * consumer only touches odd ones — so a release-store suffices, no RMW.
+     */
     private void publishSlot(int base) {
-        INT_HANDLE.setRelease(buffer, base + OFF_UNREAD, 1);
-        INT_HANDLE.getAndAdd(buffer, base + OFF_VERSION, 1);
-    }
-
-    /** Releases a claimed slot as unread without publishing (writer failed). */
-    private void abortSlot(int base) {
-        INT_HANDLE.setRelease(buffer, base + OFF_UNREAD, 0);
+        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
+        producer.next++;
     }
 
     /**
@@ -180,22 +183,15 @@ public final class SpscOffHeapRing implements AutoCloseable {
         if ((version & 1) == 0) {
             return -1;
         }
-        boolean claimed = (boolean) INT_HANDLE.compareAndSet(buffer, base + OFF_UNREAD, 1, 0);
-        if (!claimed) {
-            return -1;
-        }
         int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
         if (dstPos < 0 || size < 0 || dstPos + size > dst.length) {
-            INT_HANDLE.setRelease(buffer, base + OFF_UNREAD, 1);
+            // Slot stays odd (readable): caller can retry with a bigger dst.
             throw new IllegalArgumentException("dst too small for payload of " + size);
         }
-        try {
-            OffHeapRingSupport.copyTo(buffer, base + OFF_DATA, dst, dstPos, size);
-        } catch (RuntimeException | Error e) {
-            INT_HANDLE.setRelease(buffer, base + OFF_UNREAD, 1);
-            throw e;
-        }
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, version + 1);
+        OffHeapRingSupport.copyTo(buffer, base + OFF_DATA, dst, dstPos, size);
+        // Release (odd→even). No CAS: the producer never touches odd slots,
+        // so this release is the only writer — the consumer owns the slot.
+        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
         return size;
     }
 
@@ -205,22 +201,13 @@ public final class SpscOffHeapRing implements AutoCloseable {
         if ((version & 1) == 0) {
             return -1;
         }
-        boolean claimed = (boolean) INT_HANDLE.compareAndSet(buffer, base + OFF_UNREAD, 1, 0);
-        if (!claimed) {
-            return -1;
-        }
         int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
         if (dst.remaining() < size) {
-            INT_HANDLE.setRelease(buffer, base + OFF_UNREAD, 1);
+            // Slot stays odd (readable): caller can retry with a bigger dst.
             throw new IllegalArgumentException("dst too small for payload of " + size);
         }
-        try {
-            OffHeapRingSupport.copyToBuffer(buffer, base + OFF_DATA, dst, size);
-        } catch (RuntimeException | Error e) {
-            INT_HANDLE.setRelease(buffer, base + OFF_UNREAD, 1);
-            throw e;
-        }
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, version + 1);
+        OffHeapRingSupport.copyToBuffer(buffer, base + OFF_DATA, dst, size);
+        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
         return size;
     }
 
@@ -237,17 +224,12 @@ public final class SpscOffHeapRing implements AutoCloseable {
         if ((version & 1) == 0) {
             return -1;
         }
-        boolean claimed = (boolean) INT_HANDLE.compareAndSet(buffer, base + OFF_UNREAD, 1, 0);
-        if (!claimed) {
-            return -1;
-        }
         int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
         if (size < 0 || size > maxPayload) {
-            INT_HANDLE.setRelease(buffer, base + OFF_UNREAD, 1);
             throw new IllegalStateException("corrupt slot size " + size);
         }
         reuse.wrap(buffer, base + OFF_DATA, size);
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, version + 1);
+        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
         return size;
     }
 

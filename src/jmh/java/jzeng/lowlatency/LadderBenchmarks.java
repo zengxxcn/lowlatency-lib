@@ -147,8 +147,10 @@ public class LadderBenchmarks {
     @State(Scope.Group)
     public static class SpscLadderState {
         final SpscOffHeapRing ring = new SpscOffHeapRing(CAPACITY, MAX);
-        // External flow control (the ring itself has none). Without this the
-        // producer laps the consumer and ERROR writes stall the consumer.
+        // External flow control belt-and-braces on top of the ring's own
+        // backpressure (ERROR on a full ring consumes no sequence, but the
+        // producer advances its cursor unconditionally — without this gate a
+        // skipped sequence would stall the consumer).
         final java.util.concurrent.atomic.AtomicLong consumed =
                 new java.util.concurrent.atomic.AtomicLong(-1);
     }

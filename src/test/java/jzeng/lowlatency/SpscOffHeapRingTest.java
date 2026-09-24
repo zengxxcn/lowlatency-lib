@@ -7,8 +7,10 @@ import java.nio.charset.StandardCharsets;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * RED tests for the SPSC exactly-once off-heap ring.
- * Semantics under test: unread CAS gate + odd-version veto, Result SUCCESS/ERROR.
+ * Tests for the SPSC exactly-once off-heap ring.
+ * Semantics under test: version-parity gating (no unread flag, no CAS) —
+ * a claim on an odd (unreleased) slot fails with ERROR instead of
+ * overwriting; Result SUCCESS/ERROR.
  */
 class SpscOffHeapRingTest {
 
@@ -30,15 +32,41 @@ class SpscOffHeapRingTest {
     }
 
     @Test
-    void overrunOfUnreadSlotLosesMessage() {
-        // Documents the ring contract "writer must not overwrite unread data":
-        // with capacity 1 the second write steals the unread slot (CAS wins),
-        // and `version += 1` flips it odd->even, so the slot looks empty.
-        // Overrunning the consumer loses the message.
+    void fullRingRejectsWriteWithoutLosingData() {
+        // Producer gating (no unread flag): once backlog == capacity the
+        // target slot is still odd (consumer hasn't released it), so the
+        // write is rejected instead of overwriting slot 0.
+        try (SpscOffHeapRing ring = new SpscOffHeapRing(4)) {
+            for (int i = 0; i < 4; i++) {
+                assertEquals(SpscWriteResult.SUCCESS, ring.write(msg("m" + i)));
+            }
+            assertEquals(SpscWriteResult.ERROR, ring.write(msg("x")));
+            // All four messages intact, in order.
+            for (int i = 0; i < 4; i++) {
+                byte[] dst = new byte[64];
+                assertEquals(2, ring.read(i, dst));
+                assertEquals("m" + i, new String(dst, 0, 2, StandardCharsets.UTF_8));
+            }
+            // Drained: producer flows again, slot reuse works.
+            assertEquals(SpscWriteResult.SUCCESS, ring.write(msg("y")));
+            byte[] dst = new byte[64];
+            assertEquals(1, ring.read(4, dst));
+            assertEquals("y", new String(dst, 0, 1, StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    void capacityOneAlternationNeverLoses() {
+        // Single-slot boundary: strict even/odd alternation, no flag.
         try (SpscOffHeapRing ring = new SpscOffHeapRing(1)) {
             assertEquals(SpscWriteResult.SUCCESS, ring.write(msg("a")));
-            assertEquals(SpscWriteResult.SUCCESS, ring.write(msg("b")));
-            assertEquals(-1, ring.read(1, new byte[64]));
+            assertEquals(SpscWriteResult.ERROR, ring.write(msg("b")));
+            byte[] dst = new byte[64];
+            assertEquals(1, ring.read(0, dst));
+            assertEquals("a", new String(dst, 0, 1, StandardCharsets.UTF_8));
+            assertEquals(SpscWriteResult.SUCCESS, ring.write(msg("c")));
+            assertEquals(1, ring.read(1, dst));
+            assertEquals("c", new String(dst, 0, 1, StandardCharsets.UTF_8));
         }
     }
 
@@ -114,11 +142,11 @@ class SpscOffHeapRingTest {
 
     @Test
     @org.junit.jupiter.api.Timeout(30)
-    void errorWhenOverwritingSlotMidRead() throws Exception {
-        // The veto window (reader claimed `unread` but hasn't published yet) is
-        // nanoseconds wide, so this hammers a capacity-1 ring from both sides:
-        // every producer write targets the same slot the reader hammers.
-        // No cursor tracking — slot is always 0 — so ERROR gaps are harmless here.
+    void errorWhenProducerLapsConsumer() throws Exception {
+        // ERROR is now deterministic backpressure (slot still odd), not a
+        // nanosecond veto window: on a capacity-1 ring every second write
+        // outruns the reader. Hammer both sides and require at least one
+        // ERROR; the reader needs no cursor tracking (slot is always 0).
         try (SpscOffHeapRing ring = new SpscOffHeapRing(1)) {
             java.util.concurrent.atomic.AtomicBoolean running =
                     new java.util.concurrent.atomic.AtomicBoolean(true);
@@ -147,7 +175,7 @@ class SpscOffHeapRingTest {
                 reader.join(5_000);
             }
             assertTrue(errors.get() > 0,
-                    "expected at least one ERROR veto in " + writes.get() + " contended writes");
+                    "expected at least one ERROR backpressure rejection in " + writes.get() + " contended writes");
         }
     }
 

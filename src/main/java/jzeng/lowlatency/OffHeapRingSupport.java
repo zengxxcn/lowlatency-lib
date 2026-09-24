@@ -14,7 +14,7 @@ import java.nio.ByteOrder;
  * SLOT s (stride B, stride % 64 == 0): base = 64 + s*stride
  *   +0  version int (even = writing/empty, odd = readable)
  *   +4  size    int (0..maxPayload)
- *   +8  unread  int (SPSC only, 0/1; SPMC reserved)
+ *   +8  reserved int (padding; formerly the SPSC unread flag)
  *   +12..63     padding
  *   +64..       payload (maxPayload B, zero-padded to a 64B multiple)
  * </pre>
@@ -28,7 +28,8 @@ import java.nio.ByteOrder;
  *
  * <p>Memory-ordering map: {@code getAcquire} for acquire-loads,
  * {@code setRelease} for release-stores, {@code getAndAdd} (volatile, stronger —
- * documented) for the sequence counter, {@code compareAndSet} for claim CAS.
+ * documented) for the SPMC sequence counter. SPSC uses a producer-confined
+ * sequence field plus acquire/release version parity — no RMW anywhere.
  */
 final class OffHeapRingSupport {
 
@@ -38,7 +39,6 @@ final class OffHeapRingSupport {
 
     static final int OFF_VERSION = 0;
     static final int OFF_SIZE = 4;
-    static final int OFF_UNREAD = 8;
     static final int OFF_DATA = 64;
 
     static final VarHandle INT_HANDLE =

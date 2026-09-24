@@ -16,7 +16,7 @@ HEADER (64 B): producer sequence long @0, pad 8..63
 SLOT s (stride B), base = 64 + s*stride:
   +0  version int   (even = writing/empty, odd = readable)
   +4  size    int   (0..maxPayload)
-  +8  unread  int   (SPSC exactly-once flag; SPMC reserved)
+  +8  reserved int (padding)
   +12..63     padding (cache-line isolation)
   +64..       payload (maxPayload B)
 ```
@@ -31,13 +31,17 @@ SLOT s (stride B), base = 64 + s*stride:
     a bounded copy, one release store, no CAS at all.
   - The writer never blocks — it laps and overwrites; slow readers detect the
     gap with `messagesLost` and catch up with `clampToOldestAlive` / `jumpToNewest`.
-- **SPSC (`SpscOffHeapRing`)** — exactly-once: `unread` CAS gate + odd-version veto,
-  `write` returns `SUCCESS` / `ERROR`.
-  - Both sides are wait-free: single-attempt CAS, no retry loops — contention resolves
+- **SPSC (`SpscOffHeapRing`)** — exactly-once with no atomics: strict version
+  parity (producer touches only even slots, consumer only odd), `write` returns
+  `SUCCESS` / `ERROR`.
+  - Both sides are wait-free: acquire loads plus release stores, no CAS, no
+    fetch-add (the producer sequence is a confined field) — contention resolves
     as `ERROR` / `-1`, never spinning.
-  - `ERROR` only if a read is in flight on the target slot; beyond that
-    exactly-once holds while the consumer keeps up (external backpressure —
-    overwriting an unconsumed slot loses it).
+  - `ERROR` when the target slot is still odd, i.e. backlog == capacity: the
+    write is rejected *without consuming a sequence*, so nothing is lost and
+    retrying the same message is safe. Exactly-once holds with no external
+    flow control needed (though keeping the producer roughly paced avoids
+    wasted ERROR spins).
 - **Conflated (`ConflatedValue`)** — 1 producer × N consumers last-value register
   for when the producer is faster than the consumer and only the newest value matters.
   - Depth-1 seqlock slot (even = stable, odd = writer active): `publish`
@@ -168,7 +172,7 @@ for (;;) {
 ```
 
 ```java
-// ---- SPSC producer thread: ERROR only if a read is mid-flight on the slot ----
+// ---- SPSC producer thread: ERROR = ring full, sequence unconsumed, retry same message ----
 if (ring.write(payload) != SpscWriteResult.SUCCESS) { /* back off, retry */ }
 ```
 

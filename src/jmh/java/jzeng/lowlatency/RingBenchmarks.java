@@ -151,9 +151,11 @@ public class RingBenchmarks {
     @State(Scope.Group)
     public static class SpscState {
         SpscOffHeapRing ring = new SpscOffHeapRing(CAPACITY);
-        // External flow control (the ring itself has none — same ring contract
-        // as the stress test). Without this the producer laps the consumer,
-        // an ERROR write consumes a sequence, and the consumer stalls forever.
+        // External flow control belt-and-braces on top of the ring's own
+        // backpressure (write returns ERROR on a full ring without consuming
+        // a sequence). The producer ignores the write result and advances its
+        // cursor unconditionally, so without this gate an ERROR would skip a
+        // sequence and stall the consumer.
         java.util.concurrent.atomic.AtomicLong consumed = new java.util.concurrent.atomic.AtomicLong(-1);
     }
 

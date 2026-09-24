@@ -120,9 +120,10 @@ class RingStressTest {
             AtomicLong errors = new AtomicLong();
             java.util.concurrent.atomic.AtomicReference<Throwable> producerError =
                     new java.util.concurrent.atomic.AtomicReference<>();
-            // External flow control: the ring itself has none (ring contract:
-            // "writer must not overwrite unread data"), so the test models a
-            // well-behaved producer that never laps the consumer by >= capacity.
+            // External flow control on top of the ring's own backpressure
+            // (write returns ERROR on a full ring without consuming a
+            // sequence): the test models a well-behaved producer that never
+            // laps the consumer by >= capacity, so ERROR must not happen.
             AtomicLong consumed = new AtomicLong(-1);
 
             Thread producer = new Thread(() -> {
@@ -132,10 +133,10 @@ class RingStressTest {
                             Thread.yield();
                         }
                         byte[] p = payload(i, 32);
-                        // Sequence is consumed even on ERROR (claimed by fetch-add
-                        // before the veto), so retrying would misalign the consumer
-                        // cursor. ERROR means the producer lapped a mid-read slot;
-                        // with capacity 1024 and a keeping-up consumer it must not happen.
+                        // An ERROR write consumes no sequence (the claim is
+                        // rejected before publishing), but the gate above
+                        // means it must not happen with a keeping-up consumer:
+                        // treat it as failure, not a retry.
                         if (ring.write(p) != SpscWriteResult.SUCCESS) {
                             producerError.set(new AssertionError(
                                     "producer overran consumer at message " + i));
