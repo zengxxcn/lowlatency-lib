@@ -94,7 +94,7 @@ Latest ring numbers (ops/s, group totals):
 |---|---|---|---|
 | `disruptor1p1c` | 131.1M | 65.6M | 65.6M |
 | `spmc1p1c` | 103.0M | 51.7M | 51.4M |
-| `spsc1p1c` | 44.6M | 22.3M | 22.3M |
+| `spsc1p1c` | 101.6M | 50.8M | 50.8M |
 | `agronaSpsc1p1c` (Agrona `OneToOneRingBuffer`) | 60.5M | 30.3M | 30.3M |
 | `disruptor1p3c` | 135.9M | 101.9M | 34.0M |
 | `spmc1p3c` | 174.1M | 131.0M | 43.2M |

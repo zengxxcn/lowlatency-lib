@@ -171,28 +171,29 @@ final class OffHeapRingSupport {
         return (long) LONG_HANDLE.getAndAdd(buf, 0, 1L);
     }
 
+    // Bulk copies: absolute bulk get/put are intrinsified to Unsafe.copyMemory
+    // (single bounds check, no per-byte work, no allocation). The Buffer variants
+    // use absolute offsets on both sides so neither buffer's position is touched
+    // by the copy itself; the position advance is done explicitly to preserve
+    // the existing consume/remaining() semantics.
     static void copyFrom(ByteBuffer buf, int dataOffset, byte[] src, int srcPos, int len) {
-        for (int i = 0; i < len; i++) {
-            buf.put(dataOffset + i, src[srcPos + i]);
-        }
+        buf.put(dataOffset, src, srcPos, len);
     }
 
     static void copyTo(ByteBuffer buf, int dataOffset, byte[] dst, int dstPos, int len) {
-        for (int i = 0; i < len; i++) {
-            dst[dstPos + i] = buf.get(dataOffset + i);
-        }
+        buf.get(dataOffset, dst, dstPos, len);
     }
 
     static void copyFromBuffer(ByteBuffer buf, int dataOffset, ByteBuffer src, int len) {
-        for (int i = 0; i < len; i++) {
-            buf.put(dataOffset + i, src.get());
-        }
+        int pos = src.position();
+        buf.put(dataOffset, src, pos, len);
+        src.position(pos + len);
     }
 
     static void copyToBuffer(ByteBuffer buf, int dataOffset, ByteBuffer dst, int len) {
-        for (int i = 0; i < len; i++) {
-            dst.put(buf.get(dataOffset + i));
-        }
+        int pos = dst.position();
+        dst.put(pos, buf, dataOffset, len);
+        dst.position(pos + len);
     }
 
     /** Best-effort direct-buffer free; falls back to GC if internals are inaccessible. */
