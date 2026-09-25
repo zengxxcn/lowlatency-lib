@@ -83,33 +83,26 @@ price ladder (`TestPriceLadder`, 88..256 B actual, 256 B worst case, capacity
 flyweight overloads, Disruptor via pre-wrapped per-slot views, and heap
 snapshots for the blocking/linked baselines.
 
-Latest ring numbers (ops/s, group totals; 2 warmup + 3 measurement iterations, 1 fork):
-
 > **Machine profile (all tables below):** bare-metal AMD Ryzen 7 5800, 8 cores /
 > 16 threads, 32 MiB L3 (256 KiB L1d+L1i / 4 MiB L2 per core), 16 GiB RAM,
 > Ubuntu 24.04.4 LTS, kernel 6.17.0-35-generic, OpenJDK 21.0.12 (Ubuntu),
 > Maven 3.9.11.
 
+Latest ring numbers (ops/s, group totals):
+
 | Benchmark | Group total | Consumers (total) | Producer |
 |---|---|---|---|
-| `disruptor1p1c` | 117.6M | 58.8M | 58.8M |
-| `spmc1p1c` | 102.7M | 50.8M | 52.0M |
-| `spsc1p1c` | 43.1M | 21.5M | 21.5M |
-| `disruptor1p3c` | 132.4M | 99.3M | 33.1M |
-| `spmc1p3c` | 170.6M | 128.1M | 42.5M |
-| `blocking1p3c` (ArrayBlockingQueue) | 35.8M | 17.9M | 17.9M |
-| `clq1p3c` (ConcurrentLinkedQueue) | 15.5M | 7.6M | 7.9M |
+| `disruptor1p1c` | 131.1M | 65.6M | 65.6M |
+| `spmc1p1c` | 103.0M | 51.7M | 51.4M |
+| `spsc1p1c` | 44.6M | 22.3M | 22.3M |
+| `agronaSpsc1p1c` (Agrona `OneToOneRingBuffer`) | 60.5M | 30.3M | 30.3M |
+| `disruptor1p3c` | 135.9M | 101.9M | 34.0M |
+| `spmc1p3c` | 174.1M | 131.0M | 43.2M |
+| `blocking1p3c` (ArrayBlockingQueue) | 37.0M | 18.5M | 18.5M |
+| `clq1p3c` (ConcurrentLinkedQueue) | 5.7M (†) | 2.6M | 3.0M |
 
-Latest conflation numbers (`ConflatedBenchmarks`, 32 B payload; same protocol, 1 fork):
-
-| Benchmark | Group total | Consumers (total) | Producer (publish rate) |
-|---|---|---|---|
-| `conflated1p1c` | 173.5M | 136.8M | 36.7M |
-| `atomicref1p1c` (`AtomicReference`) | 65.5M | 30.4M | 35.1M |
-| `volatile1p1c` (plain volatile holder) | 84.0M | 48.9M | 35.1M |
-| `conflated1p3c` | 376.1M | 365.5M | 10.6M |
-| `atomicref1p3c` (`AtomicReference`) | 88.3M | 67.1M | 21.1M |
-| `volatile1p3c` (plain volatile holder) | 109.4M | 86.8M | 22.6M |
+> (†) `clq1p3c` showed high run-to-run variance in this environment; treat as
+> indicative only.
 
 Latest ladder numbers (typed variable-depth payload; same protocol, 1 fork):
 
@@ -122,6 +115,17 @@ Latest ladder numbers (typed variable-depth payload; same protocol, 1 fork):
 | `disruptorLadder1p3c` | 49.9M | 37.4M | 12.5M |
 | `blockingLadder1p3c` (ArrayBlockingQueue) | 12.3M | 6.1M | 6.1M |
 | `clqLadder1p3c` (ConcurrentLinkedQueue) | 14.1M | 7.0M | 7.0M |
+
+Latest conflation numbers (`ConflatedBenchmarks`, 32 B payload; same protocol, 1 fork):
+
+| Benchmark | Group total | Consumers (total) | Producer (publish rate) |
+|---|---|---|---|
+| `conflated1p1c` | 173.5M | 136.8M | 36.7M |
+| `atomicref1p1c` (`AtomicReference`) | 65.5M | 30.4M | 35.1M |
+| `volatile1p1c` (plain volatile holder) | 84.0M | 48.9M | 35.1M |
+| `conflated1p3c` | 376.1M | 365.5M | 10.6M |
+| `atomicref1p3c` (`AtomicReference`) | 88.3M | 67.1M | 21.1M |
+| `volatile1p3c` (plain volatile holder) | 109.4M | 86.8M | 22.6M |
 
 > **Harness note:** all consumers (and the SPSC/Disruptor backpressure paths) carry a
 > ~10 ms starvation bail — at iteration end the producer may exit while a consumer waits
