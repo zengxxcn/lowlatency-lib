@@ -68,14 +68,17 @@ public final class SpscOffHeapRing implements AutoCloseable {
     /** Convenience copy of a heap payload (allocation-free). */
     public SpscWriteResult write(byte[] payload) {
         OffHeapRingSupport.checkPayloadSize(payload.length, maxPayload);
-        long seq = claimSeqForWrite();
-        if (seq < 0) {
+        // One slotBase + one version load per write: the observed even version
+        // is carried in a local and published as version + 1.
+        int base = OffHeapRingSupport.slotBase(producer.next, capacity, stride);
+        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        if ((version & 1) == 1) {
             return SpscWriteResult.ERROR;
         }
-        int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
         OffHeapRingSupport.setSizeRelease(buffer, base, payload.length);
         OffHeapRingSupport.copyFrom(buffer, base + OFF_DATA, payload, 0, payload.length);
-        publishSlot(base);
+        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
+        producer.next++;
         return SpscWriteResult.SUCCESS;
     }
 
@@ -83,14 +86,15 @@ public final class SpscOffHeapRing implements AutoCloseable {
     public SpscWriteResult write(ByteBuffer src) {
         int size = src.remaining();
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
-        long seq = claimSeqForWrite();
-        if (seq < 0) {
+        int base = OffHeapRingSupport.slotBase(producer.next, capacity, stride);
+        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        if ((version & 1) == 1) {
             return SpscWriteResult.ERROR;
         }
-        int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
         OffHeapRingSupport.setSizeRelease(buffer, base, size);
         OffHeapRingSupport.copyFromBuffer(buffer, base + OFF_DATA, src, size);
-        publishSlot(base);
+        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
+        producer.next++;
         return SpscWriteResult.SUCCESS;
     }
 
@@ -105,14 +109,15 @@ public final class SpscOffHeapRing implements AutoCloseable {
      */
     public SpscWriteResult write(int size, DirectWriter writer) {
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
-        long seq = claimSeqForWrite();
-        if (seq < 0) {
+        int base = OffHeapRingSupport.slotBase(producer.next, capacity, stride);
+        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        if ((version & 1) == 1) {
             return SpscWriteResult.ERROR;
         }
-        int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
         OffHeapRingSupport.setSizeRelease(buffer, base, size);
         writer.writeTo(buffer, base + OFF_DATA, size);
-        publishSlot(base);
+        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
+        producer.next++;
         return SpscWriteResult.SUCCESS;
     }
 
@@ -125,47 +130,21 @@ public final class SpscOffHeapRing implements AutoCloseable {
      */
     public <E extends Flyweight> SpscWriteResult write(EventTranslator<E> translator, E view) {
         OffHeapRingSupport.checkTypeFits(view, maxPayload);
-        long seq = claimSeqForWrite();
-        if (seq < 0) {
+        long seq = producer.next;
+        int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
+        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        if ((version & 1) == 1) {
             return SpscWriteResult.ERROR;
         }
-        int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
         view.wrap(buffer, base + OFF_DATA, maxPayload);
         // Translator failure propagates with the version untouched: the slot
         // is still even (free) and `next` unadvanced, so no abort is needed.
         translator.translateTo(view, seq);
         int size = OffHeapRingSupport.checkedEncodedSize(view, maxPayload);
         OffHeapRingSupport.setSizeRelease(buffer, base, size);
-        publishSlot(base);
-        return SpscWriteResult.SUCCESS;
-    }
-
-    /**
-     * Claims the next sequence: returns it when its slot is even (free), or -1
-     * when odd (consumer hasn't released it — backlog == capacity).
-     *
-     * <p>No CAS: strict alternation means an even slot can only be freed by the
-     * consumer's release of the previous generation, and the single producer is
-     * the only writer of even slots — the acquire-load is the whole gate.
-     */
-    private long claimSeqForWrite() {
-        long seq = producer.next;
-        int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
-        if ((OffHeapRingSupport.getVersionAcquire(buffer, base) & 1) == 1) {
-            return -1;
-        }
-        return seq;
-    }
-
-    /**
-     * Publishes a claimed slot (even→odd) and advances the producer sequence.
-     * The version is still even — only this producer writes even slots and the
-     * consumer only touches odd ones — so a release-store suffices, no RMW.
-     */
-    private void publishSlot(int base) {
-        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
         OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
         producer.next++;
+        return SpscWriteResult.SUCCESS;
     }
 
     /**
