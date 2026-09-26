@@ -94,23 +94,23 @@ Latest ring numbers (ops/s, group totals):
 | Benchmark | Group total | Consumers (total) | Producer |
 |---|---|---|---|
 | `disruptor1p1c` | 131.1M | 65.6M | 65.6M |
-| `spmc1p1c` | 103.0M | 51.7M | 51.4M |
+| `spmc1p1c` | 107.9M | 53.9M | 53.9M |
 | `spsc1p1c` | 101.6M | 50.8M | 50.8M |
 | `agronaSpsc1p1c` (Agrona `OneToOneRingBuffer`) | 60.5M | 30.3M | 30.3M |
 | `disruptor1p3c` | 135.9M | 101.9M | 34.0M |
-| `spmc1p3c` | 174.1M | 131.0M | 43.2M |
+| `spmc1p3c` | 143.8M | 107.9M | 35.9M |
 | `blocking1p3c` (ArrayBlockingQueue) | 37.0M | 18.5M | 18.5M |
 | `clq1p3c` (ConcurrentLinkedQueue) | 5.7M (†) | 2.6M | 3.0M |
 
 > (†) `clq1p3c` showed high run-to-run variance in this environment; treat as
 > indicative only.
 
-Latest ladder numbers (typed variable-depth payload; same protocol, 1 fork):
+Latest ladder numbers (typed variable-depth payload; 1 fork except (§), 3 forks):
 
 | Benchmark | Group total | Consumers (total) | Producer |
 |---|---|---|---|
-| `spmcLadder1p1c` | 130.1M | 99.0M | 31.1M |
-| `spmcLadder1p3c` | 310.9M | 284.4M | 26.5M |
+| `spmcLadder1p1c` | 49.7M (§) | 24.9M (§) | 24.9M (§) |
+| `spmcLadder1p3c` | 60.0M (§) | 45.0M (§) | 15.0M (§) |
 | `spscLadder1p1c` | 29.7M | 14.8M | 14.8M |
 | `disruptorLadder1p1c` | 65.7M | 32.8M | 32.8M |
 | `disruptorLadder1p3c` | 49.9M | 37.4M | 12.5M |
