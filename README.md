@@ -100,10 +100,7 @@ Latest ring numbers (ops/s, group totals):
 | `disruptor1p3c` | 135.9M | 101.9M | 34.0M |
 | `spmc1p3c` | 143.8M | 107.9M | 35.9M |
 | `blocking1p3c` (ArrayBlockingQueue) | 37.0M | 18.5M | 18.5M |
-| `clq1p3c` (ConcurrentLinkedQueue) | 5.7M (†) | 2.6M | 3.0M |
-
-> (†) `clq1p3c` showed high run-to-run variance in this environment; treat as
-> indicative only.
+| `clq1p3c` (ConcurrentLinkedQueue) | 5.7M | 2.6M | 3.0M |
 
 Latest ladder numbers (typed variable-depth payload; 1 fork except (§), 3 forks):
 
