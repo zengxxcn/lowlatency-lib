@@ -25,10 +25,11 @@ SLOT s (stride B), base = 64 + s*stride:
 
 - **SPMC (`SpmcOffHeapRing`)** — multicast: every consumer keeps its own `blockIndex`
   cursor and observes *every* message.
-  - Reads add `+2` to the version so the slot stays readable for the other consumers.
+  - Reads are pure loads (no store to the version word), so a slot stays readable
+    for the other consumers with no extra coherence traffic.
   - The writer is wait-free: one fetch-add plus stores, never reads consumer state
-    (which is also why it can lap readers). Reads are wait-free too — acquire loads,
-    a bounded copy, one release store, no CAS at all.
+    (which is also why it can lap readers). Reads are wait-free too — acquire loads
+    and a bounded copy, no CAS and no stores at all.
   - The writer never blocks — it laps and overwrites; slow readers detect the
     gap with `messagesLost` and catch up with `clampToOldestAlive` / `jumpToNewest`.
 - **SPSC (`SpscOffHeapRing`)** — exactly-once with no atomics: strict version

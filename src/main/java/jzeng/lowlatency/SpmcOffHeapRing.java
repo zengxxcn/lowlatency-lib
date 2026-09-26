@@ -13,7 +13,8 @@ import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
  * <p>One producer appends via a monotonic sequence; every consumer keeps its own
  * every consumer keeps its own {@code blockIndex} cursor and observes every message
  * (multicast — not competing consumers). Per-slot version parity: even = writing/empty,
- * odd = readable; each read adds +2 so the slot stays readable for other consumers.
+ * odd = readable. Reads are pure loads — they never store to the version word,
+ * so a slot stays readable for the other multicast consumers with no extra traffic.
  *
  * <p>Lifecycle is caller-owned: {@link #close()} releases the direct memory and
  * must be called exactly once; no operation may follow it. There is
@@ -204,8 +205,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
             throw new IllegalArgumentException("dst too small for payload of " + size);
         }
         OffHeapRingSupport.copyTo(buffer, base + OFF_DATA, dst, dstPos, size);
-        // +2: slot stays readable for the other multicast consumers.
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, version + 2);
         return size;
     }
 
@@ -220,7 +219,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
             throw new IllegalArgumentException("dst too small for payload of " + size);
         }
         OffHeapRingSupport.copyToBuffer(buffer, base + OFF_DATA, dst, size);
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, version + 2);
         return size;
     }
 
@@ -242,8 +240,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
             throw new IllegalStateException("corrupt slot size " + size);
         }
         reuse.wrap(buffer, base + OFF_DATA, size);
-        // +2: slot stays readable for the other multicast consumers.
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, version + 2);
         return size;
     }
 

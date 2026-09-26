@@ -8,7 +8,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * RED tests for the SPMC multicast off-heap ring.
- * Semantics under test: odd version = readable, read adds +2, writer closes then publishes.
+ * Semantics under test: odd version = readable, reads are store-free (pure loads),
+ * writer closes then publishes.
  */
 class SpmcOffHeapRingTest {
 
@@ -102,7 +103,7 @@ class SpmcOffHeapRingTest {
 
     @Test
     void reReadingSameCursorReturnsDuplicate() {
-        // Reads are non-destructive (+2 keeps the version odd): a consumer that
+        // Reads are non-destructive (no store to the version word): a consumer that
         // does not advance its cursor observes the same message again.
         try (SpmcOffHeapRing ring = new SpmcOffHeapRing(8)) {
             ring.write(msg("dup"));
