@@ -4,7 +4,6 @@ import java.nio.ByteBuffer;
 
 import static jzeng.lowlatency.OffHeapRingSupport.INT_HANDLE;
 import static jzeng.lowlatency.OffHeapRingSupport.OFF_DATA;
-import static jzeng.lowlatency.OffHeapRingSupport.OFF_SIZE;
 import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
 
 /**
@@ -12,9 +11,14 @@ import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
  *
  * <p>One producer appends via a monotonic sequence; every consumer keeps its own
  * every consumer keeps its own {@code blockIndex} cursor and observes every message
- * (multicast — not competing consumers). Per-slot version parity: even = writing/empty,
- * odd = readable. Reads are pure loads — they never store to the version word,
- * so a slot stays readable for the other multicast consumers with no extra traffic.
+ * (multicast — not competing consumers). Seqlock versioning per slot: the producer
+ * brackets each write with begin (odd = writing) and end (even = published)
+ * stores, so the published version rises by 2 every lap. A cursor {@code k}
+ * therefore expects exactly version {@code 2 * (k / capacity + 1)}: a lower
+ * version means the slot isn't published for that generation yet (consumer
+ * ahead — miss), a higher one means the consumer was lapped (delivered as a
+ * skip, as before). Reads are pure loads — no stores — and re-read the version
+ * after the copy so an overlapping write degrades to a miss, never a tear.
  *
  * <p>Lifecycle is caller-owned: {@link #close()} releases the direct memory and
  * must be called exactly once; no operation may follow it. There is
@@ -27,6 +31,11 @@ public final class SpmcOffHeapRing implements AutoCloseable {
     private final int capacity;
     private final int maxPayload;
     private final int stride;
+    /**
+     * log2(capacity), precomputed: capacity is always a power of 2
+     * (enforced by {@code allocate}), so lap arithmetic is shifts, not division.
+     */
+    private final int slotShift;
 
     public SpmcOffHeapRing(int capacity) {
         this(capacity, OffHeapRingSupport.MAX_PAYLOAD);
@@ -39,6 +48,7 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         this.capacity = capacity;
         this.maxPayload = maxPayload;
         this.stride = OffHeapRingSupport.slotStride(maxPayload);
+        this.slotShift = Integer.numberOfTrailingZeros(capacity);
     }
 
     public int capacity() {
@@ -105,23 +115,28 @@ public final class SpmcOffHeapRing implements AutoCloseable {
     /** Convenience copy of a heap payload (allocation-free). */
     public void write(byte[] payload) {
         OffHeapRingSupport.checkPayloadSize(payload.length, maxPayload);
-        int base = nextSlot();
-        int publish = closeSlot(base);
+        long seq = OffHeapRingSupport.getAndAddSequence(buffer);
+        int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
+        int begin = beginVersion(seq);
+        // Begin (odd): readers miss while the payload lands.
+        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin);
         OffHeapRingSupport.setSizeRelease(buffer, base, payload.length);
         OffHeapRingSupport.copyFrom(buffer, base + OFF_DATA, payload, 0, payload.length);
-        // Publish (odd) — readable by all consumers.
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, publish);
+        // End (even): published to all consumers.
+        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin + 1);
     }
 
     /** Convenience copy from a {@link ByteBuffer} (consumes {@code remaining()} bytes, allocation-free). */
     public void write(ByteBuffer src) {
         int size = src.remaining();
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
-        int base = nextSlot();
-        int publish = closeSlot(base);
+        long seq = OffHeapRingSupport.getAndAddSequence(buffer);
+        int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
+        int begin = beginVersion(seq);
+        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin);
         OffHeapRingSupport.setSizeRelease(buffer, base, size);
         OffHeapRingSupport.copyFromBuffer(buffer, base + OFF_DATA, src, size);
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, publish);
+        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin + 1);
     }
 
     /**
@@ -133,12 +148,14 @@ public final class SpmcOffHeapRing implements AutoCloseable {
      */
     public void write(int size, DirectWriter writer) {
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
-        int base = nextSlot();
-        int publish = closeSlot(base);
+        long seq = OffHeapRingSupport.getAndAddSequence(buffer);
+        int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
+        int begin = beginVersion(seq);
+        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin);
         OffHeapRingSupport.setSizeRelease(buffer, base, size);
         writer.writeTo(buffer, base + OFF_DATA, size);
-        // Publish (odd) — readable by all consumers.
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, publish);
+        // End (even): published to all consumers.
+        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin + 1);
     }
 
     /**
@@ -156,39 +173,50 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         OffHeapRingSupport.checkTypeFits(view, maxPayload);
         long seq = OffHeapRingSupport.getAndAddSequence(buffer);
         int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
-        int publish = closeSlot(base);
+        int begin = beginVersion(seq);
+        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin);
         view.wrap(buffer, base + OFF_DATA, maxPayload);
-        translator.translateTo(view, seq);
+        try {
+            translator.translateTo(view, seq);
+        } catch (RuntimeException | Error e) {
+            // Restore the pre-write (even) version: the slot was never
+            // published, so it must read as a normal miss, not stuck writing.
+            OffHeapRingSupport.setVersionRelease(buffer, base, begin - 1);
+            throw e;
+        }
         int size = OffHeapRingSupport.checkedEncodedSize(view, maxPayload);
         OffHeapRingSupport.setSizeRelease(buffer, base, size);
-        // Publish (odd) — readable by all consumers.
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, publish);
-    }
-
-    /** Advances the producer sequence and returns the target slot base. */
-    private int nextSlot() {
-        long seq = OffHeapRingSupport.getAndAddSequence(buffer);
-        return OffHeapRingSupport.slotBase(seq, capacity, stride);
+        // End (even): published to all consumers.
+        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin + 1);
     }
 
     /**
-     * Closes a readable slot for writing (single acquire read, no double-load
-     * TOCTOU); returns the version to publish with.
+     * Seqlock begin version for sequence {@code seq}, computed — no version
+     * load needed. Lap {@code L = seq / capacity} publishes {@code 2L+2};
+     * begin parks the slot at {@code 2L+1} (odd = writing) while the payload
+     * lands. Unconditional overwrite: a lapped reader detects the gap via
+     * the generation check on read.
      */
-    private int closeSlot(int base) {
-        int observed = OffHeapRingSupport.getVersionAcquire(buffer, base);
-        int publish = observed + 1;
-        if ((observed & 1) == 1) {
-            OffHeapRingSupport.setVersionRelease(buffer, base, publish);
-            publish++;
-        }
-        return publish;
+    private int beginVersion(long seq) {
+        return (int) (((seq >>> slotShift) << 1) + 1);
+    }
+
+    /**
+     * Version cursor {@code blockIndex} expects: {@code 2 * (lap + 1)} where
+     * {@code lap = blockIndex / capacity}. Version 0 (never published) is
+     * always below expectation, so fresh slots miss.
+     */
+    private int expectedVersion(long blockIndex) {
+        return (int) (((blockIndex >>> slotShift) + 1) << 1);
     }
 
     /**
      * Reads the slot at {@code blockIndex} (caller's own cursor, wraps at capacity).
      *
-     * @return payload size, or -1 on miss (version even).
+     * @return payload size, or -1 on miss: writer active (odd version),
+     *         not yet published for this generation (consumer ahead), or torn
+     *         by an overlapping write (retry). A newer generation than expected
+     *         (consumer lapped) is delivered as a skip, as before.
      */
     public int read(long blockIndex, byte[] dst) {
         return read(blockIndex, dst, 0);
@@ -196,8 +224,11 @@ public final class SpmcOffHeapRing implements AutoCloseable {
 
     public int read(long blockIndex, byte[] dst, int dstPos) {
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
-        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
-        if ((version & 1) == 0) {
+        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        if ((v0 & 1) == 1) {
+            return -1;
+        }
+        if (v0 < expectedVersion(blockIndex)) {
             return -1;
         }
         int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
@@ -205,13 +236,19 @@ public final class SpmcOffHeapRing implements AutoCloseable {
             throw new IllegalArgumentException("dst too small for payload of " + size);
         }
         OffHeapRingSupport.copyTo(buffer, base + OFF_DATA, dst, dstPos, size);
+        if (OffHeapRingSupport.getVersionAcquire(buffer, base) != v0) {
+            return -1;
+        }
         return size;
     }
 
     public int read(long blockIndex, ByteBuffer dst) {
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
-        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
-        if ((version & 1) == 0) {
+        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        if ((v0 & 1) == 1) {
+            return -1;
+        }
+        if (v0 < expectedVersion(blockIndex)) {
             return -1;
         }
         int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
@@ -219,6 +256,9 @@ public final class SpmcOffHeapRing implements AutoCloseable {
             throw new IllegalArgumentException("dst too small for payload of " + size);
         }
         OffHeapRingSupport.copyToBuffer(buffer, base + OFF_DATA, dst, size);
+        if (OffHeapRingSupport.getVersionAcquire(buffer, base) != v0) {
+            return -1;
+        }
         return size;
     }
 
@@ -227,12 +267,19 @@ public final class SpmcOffHeapRing implements AutoCloseable {
      * returns the size; on miss returns -1 and leaves {@code reuse} untouched.
      * Zero-copy — no bytes moved, no objects created.
      *
+     * <p>Miss means writer active, not yet published (consumer ahead), or torn
+     * by an overlapping write. A newer generation (consumer lapped) is delivered
+     * as a skip.
+     *
      * <p>The wrapped view is valid only until the producer overwrites the slot.
      */
     public <E extends Flyweight> int read(long blockIndex, E reuse) {
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
-        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
-        if ((version & 1) == 0) {
+        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        if ((v0 & 1) == 1) {
+            return -1;
+        }
+        if (v0 < expectedVersion(blockIndex)) {
             return -1;
         }
         int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
@@ -240,6 +287,9 @@ public final class SpmcOffHeapRing implements AutoCloseable {
             throw new IllegalStateException("corrupt slot size " + size);
         }
         reuse.wrap(buffer, base + OFF_DATA, size);
+        if (OffHeapRingSupport.getVersionAcquire(buffer, base) != v0) {
+            return -1;
+        }
         return size;
     }
 

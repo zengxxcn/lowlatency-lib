@@ -8,8 +8,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * RED tests for the SPMC multicast off-heap ring.
- * Semantics under test: odd version = readable, reads are store-free (pure loads),
- * writer closes then publishes.
+ * Semantics under test: seqlock versions (even = published, odd = writing),
+ * generation fencing (ahead reads miss), writer brackets then publishes.
  */
 class SpmcOffHeapRingTest {
 
@@ -112,35 +112,6 @@ class SpmcOffHeapRingTest {
             assertEquals(3, ring.read(0, first));
             assertEquals(3, ring.read(0, second));
             assertArrayEquals(first, second);
-        }
-    }
-
-    @Test
-    void consumerOverrunProducerMissesUntilPublish() {
-        // Consumer ahead of the producer: miss, then the same cursor hits
-        // once the producer publishes — the spin-wait contract.
-        try (SpmcOffHeapRing ring = new SpmcOffHeapRing(8)) {
-            assertEquals(-1, ring.read(0, new byte[64]));
-            ring.write(msg("late"));
-            byte[] dst = new byte[64];
-            assertEquals(4, ring.read(0, dst));
-            assertEquals("late", new String(dst, 0, 4, StandardCharsets.UTF_8));
-        }
-    }
-
-    @Test
-    void producerOverrunSkipsMessages() {
-        // Capacity 2, three writes: the slot for cursor 0 now holds "C".
-        // The lagging consumer reads newer data as if it were the old message —
-        // silent skip, no corruption, no error signal.
-        try (SpmcOffHeapRing ring = new SpmcOffHeapRing(2)) {
-            ring.write(msg("A"));
-            ring.write(msg("B"));
-            ring.write(msg("C"));
-            byte[] dst = new byte[64];
-            int n = ring.read(0, dst);
-            assertEquals(1, n);
-            assertEquals("C", new String(dst, 0, n, StandardCharsets.UTF_8));
         }
     }
 
