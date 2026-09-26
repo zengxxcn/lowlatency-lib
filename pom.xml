@@ -25,6 +25,10 @@
     <jmh.version>1.37</jmh.version>
     <disruptor.version>4.0.0</disruptor.version>
     <agrona.version>2.6.1</agrona.version>
+    <!-- NOTE: not on Maven Central; built + installed locally from
+         https://github.com/coralblocks/CoralQueue (GitHub Packages needs auth).
+         See README benchmark section. -->
+    <coralqueue.version>1.15.5-SNAPSHOT</coralqueue.version>
   </properties>
 
   <dependencies>
@@ -43,6 +47,11 @@
       <groupId>org.agrona</groupId>
       <artifactId>agrona</artifactId>
       <version>${agrona.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.coralblocks</groupId>
+      <artifactId>coralqueue</artifactId>
+      <version>${coralqueue.version}</version>
     </dependency>
     <dependency>
       <groupId>org.openjdk.jmh</groupId>

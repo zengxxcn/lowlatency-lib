@@ -25,6 +25,19 @@ public class ConflatedBenchmarks {
 
     private static final int PAYLOAD = 32;
 
+    /**
+     * Fixed filler for bytes 5..31, identical to the old per-byte loops. Bytes
+     * 0..4 stay sequence-derived per publish. Bulk copy instead of hand loop:
+     * same bytes, less loop overhead.
+     */
+    private static final byte[] TEMPLATE = new byte[PAYLOAD];
+
+    static {
+        for (int i = 0; i < PAYLOAD; i++) {
+            TEMPLATE[i] = (byte) i;
+        }
+    }
+
     // ---------------- Conflated 1P x 1C / 1P x 3C ----------------
 
     @State(Scope.Group)
@@ -47,9 +60,7 @@ public class ConflatedBenchmarks {
         p[2] = (byte) (id >>> 8);
         p[3] = (byte) id;
         p[4] = (byte) (id * 31 + 7);
-        for (int i = 5; i < p.length; i++) {
-            p[i] = (byte) i;
-        }
+        System.arraycopy(TEMPLATE, 5, p, 5, p.length - 5);
         v.publish(p);
     }
 
@@ -113,9 +124,7 @@ public class ConflatedBenchmarks {
         data[2] = (byte) (id >>> 8);
         data[3] = (byte) id;
         data[4] = (byte) (id * 31 + 7);
-        for (int i = 5; i < data.length; i++) {
-            data[i] = (byte) i;
-        }
+        System.arraycopy(TEMPLATE, 5, data, 5, data.length - 5);
         return data;
     }
 

@@ -43,6 +43,20 @@ public class RingBenchmarks {
     private static final int CAPACITY = 1024;
     private static final int PAYLOAD = 32;
 
+    /**
+     * Fixed fill pattern, identical bytes to the old per-byte loops. All producer
+     * fills and baseline consumer copies go through bulk intrinsics
+     * (System.arraycopy / ByteBuffer bulk put) instead of hand-rolled loops:
+     * same per-message work, less JIT-dependence and loop overhead.
+     */
+    private static final byte[] TEMPLATE = new byte[PAYLOAD];
+
+    static {
+        for (int i = 0; i < PAYLOAD; i++) {
+            TEMPLATE[i] = (byte) i;
+        }
+    }
+
     // ---------------- SPMC 1P x 1C ----------------
 
     @State(Scope.Group)
@@ -60,9 +74,7 @@ public class RingBenchmarks {
     @GroupThreads(1)
     public void spmc1p1cProducer(Spmc1p1c g) {
         g.ring.write(PAYLOAD, (buf, off, n) -> {
-            for (int i = 0; i < n; i++) {
-                buf.put(off + i, (byte) i);
-            }
+            buf.put(off, TEMPLATE, 0, n);
         });
     }
 
@@ -85,9 +97,7 @@ public class RingBenchmarks {
     @GroupThreads(1)
     public void spmc1p3cProducer(Spmc1p3c g) {
         g.ring.write(PAYLOAD, (buf, off, n) -> {
-            for (int i = 0; i < n; i++) {
-                buf.put(off + i, (byte) i);
-            }
+            buf.put(off, TEMPLATE, 0, n);
         });
     }
 
@@ -122,9 +132,7 @@ public class RingBenchmarks {
     @GroupThreads(1)
     public void spmcCatchupProducer(SpmcCatchup g) {
         g.ring.write(PAYLOAD, (buf, off, n) -> {
-            for (int i = 0; i < n; i++) {
-                buf.put(off + i, (byte) i);
-            }
+            buf.put(off, TEMPLATE, 0, n);
         });
     }
 
@@ -176,9 +184,7 @@ public class RingBenchmarks {
             }
         }
         g.ring.write(PAYLOAD, (buf, off, n) -> {
-            for (int i = 0; i < n; i++) {
-                buf.put(off + i, (byte) i);
-            }
+            buf.put(off, TEMPLATE, 0, n);
         });
         c.cursor++;
     }
@@ -240,9 +246,7 @@ public class RingBenchmarks {
     @Group("agronaSpsc1p1c")
     @GroupThreads(1)
     public void agronaSpscProducer(AgronaSpsc g) {
-        for (int i = 0; i < PAYLOAD; i++) {
-            g.src.putByte(i, (byte) i);
-        }
+        g.src.putBytes(0, TEMPLATE, 0, PAYLOAD);
         if (!g.rb.write(1, g.src, 0, PAYLOAD)) {
             // Backpressure with escape hatch (same shape as spsc1p1c): Agrona
             // reports full instead of consuming a sequence, so retry; a live
@@ -326,9 +330,7 @@ public class RingBenchmarks {
         long seq = g.rb.next();
         try {
             byte[] d = g.rb.get(seq).data;
-            for (int i = 0; i < PAYLOAD; i++) {
-                d[i] = (byte) i;
-            }
+            System.arraycopy(TEMPLATE, 0, d, 0, PAYLOAD);
         } finally {
             g.rb.publish(seq);
         }
@@ -357,9 +359,7 @@ public class RingBenchmarks {
             }
         }
         byte[] d = g.rb.get(await).data;
-        for (int i = 0; i < PAYLOAD; i++) {
-            s.buf[i] = d[i];
-        }
+        System.arraycopy(d, 0, s.buf, 0, PAYLOAD);
         c.gate.set(await);
         c.cursor++;
         return PAYLOAD;
@@ -401,9 +401,7 @@ public class RingBenchmarks {
         long seq = g.rb.next();
         try {
             byte[] d = g.rb.get(seq).data;
-            for (int i = 0; i < PAYLOAD; i++) {
-                d[i] = (byte) i;
-            }
+            System.arraycopy(TEMPLATE, 0, d, 0, PAYLOAD);
         } finally {
             g.rb.publish(seq);
         }
@@ -428,9 +426,7 @@ public class RingBenchmarks {
             }
         }
         byte[] d = g.rb.get(await).data;
-        for (int i = 0; i < PAYLOAD; i++) {
-            s.buf[i] = d[i];
-        }
+        System.arraycopy(d, 0, s.buf, 0, PAYLOAD);
         c.gate.set(await);
         c.cursor++;
         return PAYLOAD;
