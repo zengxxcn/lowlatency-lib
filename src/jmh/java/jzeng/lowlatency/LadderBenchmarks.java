@@ -85,63 +85,6 @@ public class LadderBenchmarks {
         final TestPriceLadder ladder = new TestPriceLadder();
     }
 
-    // ---------------- SPMC ladder 1P x 1C / 1P x 3C ----------------
-
-    @State(Scope.Group)
-    public static class SpmcLadder1p1c {
-        final SpmcOffHeapRing ring = new SpmcOffHeapRing(CAPACITY, MAX);
-    }
-
-    @Benchmark
-    @Group("spmcLadder1p1c")
-    @GroupThreads(1)
-    public void spmcLadderProducer1(SpmcLadder1p1c g, LadderView p) {
-        g.ring.write(LadderBenchmarks::fillLadder, p.ladder);
-    }
-
-    @Benchmark
-    @Group("spmcLadder1p1c")
-    @GroupThreads(1)
-    public int spmcLadderConsumer1(SpmcLadder1p1c g, Cursor c, LadderView v) {
-        return spinTypedRead(g.ring, c, v.ladder);
-    }
-
-    @State(Scope.Group)
-    public static class SpmcLadder1p3c {
-        final SpmcOffHeapRing ring = new SpmcOffHeapRing(CAPACITY, MAX);
-    }
-
-    @Benchmark
-    @Group("spmcLadder1p3c")
-    @GroupThreads(1)
-    public void spmcLadderProducer3(SpmcLadder1p3c g, LadderView p) {
-        g.ring.write(LadderBenchmarks::fillLadder, p.ladder);
-    }
-
-    @Benchmark
-    @Group("spmcLadder1p3c")
-    @GroupThreads(3)
-    public int spmcLadderConsumer3(SpmcLadder1p3c g, Cursor c, LadderView v) {
-        return spinTypedRead(g.ring, c, v.ladder);
-    }
-
-    private static int spinTypedRead(SpmcOffHeapRing ring, Cursor c, TestPriceLadder reuse) {
-        int n;
-        if ((n = ring.read(c.cursor, reuse)) < 0) {
-            // Starved: spin with escape hatch (same protocol as RingBenchmarks).
-            long spins = 0;
-            long start = System.nanoTime();
-            while ((n = ring.read(c.cursor, reuse)) < 0) {
-                if (((++spins & 0x3FF) == 0) && (System.nanoTime() - start) > 10_000_000L) {
-                    return -1; // iteration over: one phantom op per thread per phase
-                }
-            }
-        }
-        int sum = ladderChecksum(reuse, n);
-        c.cursor++;
-        return sum;
-    }
-
     // ---------------- SPSC ladder 1P x 1C ----------------
 
     @State(Scope.Group)

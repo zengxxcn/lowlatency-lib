@@ -80,7 +80,7 @@ consumers, 32 B payload, capacity 1024) using a manually-driven
 single-producer `RingBuffer` with per-consumer gating sequences.
 `LadderBenchmarks` repeats the same comparison with a typed variable-depth FX
 price ladder (`TestPriceLadder`, 88..256 B actual, 256 B worst case, capacity
-1024, rings sized `(1024, MAX_ENCODED)`): SPMC/SPSC via the generic
+1024, rings sized `(1024, MAX_ENCODED)`): SPSC via the generic
 flyweight overloads, Disruptor via pre-wrapped per-slot views, and heap
 snapshots for the blocking/linked baselines.
 
@@ -106,8 +106,6 @@ Latest ladder numbers (typed variable-depth payload; 1 fork except (§), 3 forks
 
 | Benchmark | Group total | Consumers (total) | Producer |
 |---|---|---|---|
-| `spmcLadder1p1c` | 49.7M (§) | 24.9M (§) | 24.9M (§) |
-| `spmcLadder1p3c` | 60.0M (§) | 45.0M (§) | 15.0M (§) |
 | `spscLadder1p1c` | 29.7M | 14.8M | 14.8M |
 | `disruptorLadder1p1c` | 65.7M | 32.8M | 32.8M |
 | `disruptorLadder1p3c` | 49.9M | 37.4M | 12.5M |
@@ -160,13 +158,13 @@ byte[] dst = new byte[64];
 long cursor = 0;
 for (;;) {
     int n = ring.read(cursor, dst);
-    if (n < 0) {                                  // producer idle, or we got lapped —
-        long prod = ring.producerSequence();      // one cross-core load decides which
-        long lost = prod - ring.capacity() - cursor; // == messagesLost(cursor)
-        if (lost <= 0) { park(); continue; }      // idle: wait, retry same cursor
-        dropped += lost;                          // lapped: count the skip...
-        cursor = prod - ring.capacity();          // ...resume at oldest live (= clampToOldestAlive)
+    if (n == SpmcOffHeapRing.GAP_LAPPED) {      // lapped: jump to oldest live...
+        dropped += ring.messagesLost(cursor);   // ...counting the gap first...
+        cursor = ring.clampToOldestAlive(cursor);
         continue;
+    }
+    if (n < 0) {                                // MISS: producer idle or torn —
+        park(); continue;                       // retry same cursor
     }
     onMessage(dst, n);
     cursor++;

@@ -63,19 +63,26 @@ class SpmcOverrunTest {
     }
 
     @Test
-    void producerOverrunSkipsMessages() {
+    void producerOverrunSignalsGapThenClamp() {
         // Capacity 2, three writes: the slot for cursor 0 now holds generation 2
         // ("C"), a newer generation than cursor 0 expects. The lagging consumer
-        // reads the newer data as if it were the old message — silent skip,
-        // no corruption, no error signal.
+        // gets GAP_LAPPED (-2), never the newer data as a silent skip — clamp
+        // then drains the live messages (B, C) in order, no duplicates.
         try (SpmcOffHeapRing ring = new SpmcOffHeapRing(2)) {
             ring.write(msg("A"));
             ring.write(msg("B"));
             ring.write(msg("C"));
             byte[] dst = new byte[64];
-            int n = ring.read(0, dst);
-            assertEquals(1, n);
-            assertEquals("C", new String(dst, 0, n, StandardCharsets.UTF_8));
+            assertEquals(SpmcOffHeapRing.GAP_LAPPED, ring.read(0, dst));
+            long cursor = ring.clampToOldestAlive(0);
+            assertEquals(1, cursor);
+            int nb = ring.read(cursor, dst);
+            assertEquals(1, nb);
+            assertEquals("B", new String(dst, 0, nb, StandardCharsets.UTF_8));
+            cursor++;
+            int nc = ring.read(cursor, dst);
+            assertEquals(1, nc);
+            assertEquals("C", new String(dst, 0, nc, StandardCharsets.UTF_8));
         }
     }
 
