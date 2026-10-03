@@ -3,8 +3,10 @@ package jzeng.lowlatency;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Group;
 import org.openjdk.jmh.annotations.GroupThreads;
+import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.State;
+import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
@@ -21,6 +23,7 @@ import org.agrona.concurrent.ringbuffer.RingBufferDescriptor;
 
 import java.nio.ByteBuffer;
 
+import java.util.Arrays;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
@@ -150,6 +153,74 @@ public class RingBenchmarks {
             for (int i = 0; i < PAYLOAD; i++) {
                 st.sink += s.buf[i];
             }
+        }
+        return n;
+    }
+
+    // ---------------- SPMC latency 1P x 1C (paced, near-empty ring) ----------------
+    // SampleTime would only time the consumer's spin (i.e. the pacing
+    // interval), not the message's transit. Instead the producer stamps
+    // nanoTime into the payload and the consumer records (now - stamped)
+    // into a preallocated array; TearDown prints percentiles per iteration.
+    // Paced at ~5 us/msg so the ring stays near-empty: this is unloaded
+    // one-way latency. Saturated latency adds queueing (see README).
+
+    @State(Scope.Group)
+    public static class SpmcLat {
+        SpmcOffHeapRing ring = new SpmcOffHeapRing(CAPACITY);
+    }
+
+    @State(Scope.Thread)
+    public static class LatSamples {
+        final long[] lat = new long[1 << 21]; // ~2M samples: 5 us pace x 10 s
+        int count;
+
+        @TearDown(Level.Iteration)
+        public void printLat() {
+            int n = count;
+            if (n == 0) {
+                System.out.println("[spmcLat] no samples");
+                return;
+            }
+            long[] sorted = Arrays.copyOf(lat, n);
+            Arrays.sort(sorted);
+            long sum = 0;
+            for (long v : sorted) {
+                sum += v;
+            }
+            System.out.printf("[spmcLat] n=%d mean=%d p50=%d p90=%d p99=%d p999=%d max=%d (ns)%n",
+                    n, sum / n, sorted[n / 2], sorted[(int) (n * 0.90)],
+                    sorted[(int) (n * 0.99)], sorted[(int) (n * 0.999)], sorted[n - 1]);
+            count = 0;
+        }
+    }
+
+    @Benchmark
+    @Group("spmcLat1p1c")
+    @GroupThreads(1)
+    public void spmcLatProducer(SpmcLat g) {
+        g.ring.write(PAYLOAD, (buf, off, n) -> {
+            buf.putLong(off, System.nanoTime());
+            buf.put(off + 8, TEMPLATE, 8, n - 8);
+        });
+        java.util.concurrent.locks.LockSupport.parkNanos(5_000);
+    }
+
+    @Benchmark
+    @Group("spmcLat1p1c")
+    @GroupThreads(1)
+    public int spmcLatConsumer(SpmcLat g, Cursor c, Scratch s, LatSamples ls) {
+        int n = spinRead(g.ring, c, s.buf);
+        if (n >= 0 && ls.count < ls.lat.length) {
+            long t0 = ((long) (s.buf[0] & 0xFF) << 56)
+                    | ((long) (s.buf[1] & 0xFF) << 48)
+                    | ((long) (s.buf[2] & 0xFF) << 40)
+                    | ((long) (s.buf[3] & 0xFF) << 32)
+                    | ((long) (s.buf[4] & 0xFF) << 24)
+                    | ((s.buf[5] & 0xFF) << 16)
+                    | ((s.buf[6] & 0xFF) << 8)
+                    | (s.buf[7] & 0xFF);
+            ls.lat[ls.count++] = System.nanoTime() - t0;
         }
         return n;
     }
