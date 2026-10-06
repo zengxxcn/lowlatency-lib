@@ -195,12 +195,27 @@ public final class SpmcOffHeapRing implements AutoCloseable {
     }
 
     /**
+     * Gap-vs-miss classification for an even {@code v0 != expected}.
+     *
+     * <p>Published versions cycle mod 2^32 (wrap after
+     * {@code capacity * 2^30} messages), so a signed {@code v0 > expected}
+     * misclassifies where the two straddle the wrap boundary: a lapped
+     * reader would spin on MISS instead of clamping forward. The
+     * subtraction is exact in two's complement and its sign is correct
+     * for any realistic generation distance (serial-arithmetic comparison).
+     */
+    static int classifyGap(int v0, int expected) {
+        return (v0 - expected) > 0 ? GAP_LAPPED : MISS;
+    }
+
+    /**
      * Reads the slot at {@code blockIndex} (caller's own cursor, wraps at capacity).
      *
      * @return payload size, {@link #MISS} on miss (writer active with odd version, not
-     *         yet published for this generation with {@code v0 < expected}, or
+     *         yet published for this generation with {@code v0} behind {@code expected}, or
      *         torn by an overlapping write — retry same cursor), or
-     *         {@link #GAP_LAPPED} (-2) when lapped ({@code v0 > expected}).
+     *         {@link #GAP_LAPPED} (-2) when lapped ({@code v0} ahead of
+     *         {@code expected} mod 2^32).
      */
     public int read(long blockIndex, byte[] dst) {
         return read(blockIndex, dst, 0);
@@ -214,7 +229,7 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         }
         int exp = expectedVersion(blockIndex);
         if (v0 != exp) {
-            return v0 > exp ? GAP_LAPPED : MISS;
+            return classifyGap(v0, exp);
         }
         int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
         if (dstPos < 0 || size < 0 || dstPos + size > dst.length) {
@@ -235,7 +250,7 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         }
         int exp = expectedVersion(blockIndex);
         if (v0 != exp) {
-            return v0 > exp ? GAP_LAPPED : MISS;
+            return classifyGap(v0, exp);
         }
         int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
         if (dst.remaining() < size) {
