@@ -21,6 +21,13 @@ import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
  * {@link #clampToOldestAlive} and re-read). Reads are pure loads — no stores — and re-read the version
  * after the copy so an overlapping write degrades to a miss, never a tear.
  *
+ * <p>Typed ({@link Flyweight}) reads copy into a ring-owned heap snapshot
+ * (see {@link #read(long, Flyweight)}): the caller wraps the view over frozen
+ * bytes, so decode cannot tear against an overwriting producer. The snapshot
+ * is reused across calls, so decode eagerly before the next typed read.
+ * This ring deliberately offers no slot-aliased typed read: a view over live
+ * slot bytes can be invalidated by the producer mid-decode.
+ *
  * <p>Lifecycle is caller-owned: {@link #close()} releases the direct memory and
  * must be called exactly once; no operation may follow it. There is
  * intentionally no per-operation open check.
@@ -44,6 +51,7 @@ public final class SpmcOffHeapRing implements AutoCloseable {
 
     private final ByteBuffer buffer;
     private final ByteBuffer rawOwner;
+    private final ByteBuffer snapshot;
     private final int capacity;
     private final int maxPayload;
     private final int stride;
@@ -61,6 +69,7 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         OffHeapRingSupport.Region region = OffHeapRingSupport.allocate(capacity, maxPayload);
         this.buffer = region.slice;
         this.rawOwner = region.raw;
+        this.snapshot = ByteBuffer.allocate(maxPayload);
         this.capacity = capacity;
         this.maxPayload = maxPayload;
         this.stride = OffHeapRingSupport.slotStride(maxPayload);
@@ -175,6 +184,40 @@ public final class SpmcOffHeapRing implements AutoCloseable {
     }
 
     /**
+     * Typed write: {@code translator} fills the slot-bound {@code view} in place.
+     * Disruptor-style publish without the on-heap event array — the slot region
+     * is the preallocated event, the caller's reusable view lends it a type.
+     * Runs inside the closed (odd-version) window, so readers simply miss for
+     * the duration; no torn view is possible.
+     *
+     * <p>Fit is enforced per write: the type's {@code maxEncodedLength()} must fit
+     * this ring, and the message's {@code encodedLength()} must fit both.
+     *
+     * <p>Pass a non-capturing lambda, method reference, or shared instance to stay
+     * allocation-free; a capturing lambda allocates per call.
+     */
+    public <E extends Flyweight> void write(EventTranslator<E> translator, E view) {
+        OffHeapRingSupport.checkTypeFits(view, maxPayload);
+        long seq = OffHeapRingSupport.getAndAddSequence(buffer);
+        int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
+        int begin = beginVersion(seq);
+        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin);
+        view.wrap(buffer, base + OFF_DATA, maxPayload);
+        try {
+            translator.translateTo(view, seq);
+        } catch (RuntimeException | Error e) {
+            // Restore the pre-write (even) version: the slot was never
+            // published, so it must read as a normal miss, not stuck writing.
+            OffHeapRingSupport.setVersionRelease(buffer, base, begin - 1);
+            throw e;
+        }
+        int size = OffHeapRingSupport.checkedEncodedSize(view, maxPayload);
+        OffHeapRingSupport.setSizeRelease(buffer, base, size);
+        // End (even): published to all consumers.
+        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin + 1);
+    }
+
+    /**
      * Seqlock begin version for sequence {@code seq}, computed — no version
      * load needed. Lap {@code L = seq / capacity} publishes {@code 2L+2};
      * begin parks the slot at {@code 2L+1} (odd = writing) while the payload
@@ -260,6 +303,43 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         if (OffHeapRingSupport.getVersionAcquire(buffer, base) != v0) {
             return MISS;
         }
+        return size;
+    }
+
+    /**
+     * Typed read: copies the slot payload into this ring's internal
+     * {@code maxPayload}-sized heap snapshot, revalidates the version after
+     * the copy, then wraps {@code reuse} over the validated snapshot and
+     * returns the size. The snapshot bytes are frozen, so decoding cannot
+     * tear against an overwriting producer — the guarantee a slot-aliased
+     * view cannot offer.
+     *
+     * <p>Returns {@link #MISS} (writer active, not yet published, or torn —
+     * {@code reuse} left untouched) or {@link #GAP_LAPPED} (consumer lapped;
+     * clamp with {@code clampToOldestAlive} and re-read). The snapshot is
+     * ring-owned and reused across calls, so {@code reuse} is valid only
+     * until the next typed read on this ring: decode eagerly (getters
+     * before the next {@code read}) or copy the fields out.
+     */
+    public <E extends Flyweight> int read(long blockIndex, E reuse) {
+        int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
+        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        if ((v0 & 1) == 1) {
+            return MISS;
+        }
+        int exp = expectedVersion(blockIndex);
+        if (v0 != exp) {
+            return classifyGap(v0, exp);
+        }
+        int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
+        if (size < 0 || size > maxPayload) {
+            throw new IllegalStateException("corrupt slot size " + size);
+        }
+        OffHeapRingSupport.copyToBuffer(buffer, base + OFF_DATA, snapshot, size);
+        if (OffHeapRingSupport.getVersionAcquire(buffer, base) != v0) {
+            return MISS;
+        }
+        reuse.wrap(snapshot, 0, size);
         return size;
     }
 
