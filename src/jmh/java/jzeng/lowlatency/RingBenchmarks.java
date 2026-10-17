@@ -576,14 +576,24 @@ public class RingBenchmarks {
     private static int spinRead(SpmcOffHeapRing ring, Cursor c, byte[] scratch) {
         int n;
         if ((n = ring.read(c.cursor, scratch)) < 0) {
-            // Starved: spin with escape hatch. Once the producer exits (iteration
-            // end) the cursor never advances and JMH's preTearDown barrier would hang
-            // forever. A live producer publishes every ~30 ns, so a 10 ms gap means it
-            // is gone; bail out. The fed path (single read) is unaffected, and the time
-            // check runs every 1024 spins to keep reaction latency tight.
+            // MISS: this generation is not published yet (or the copy was torn).
+            // GAP_LAPPED: the producer lapped us — the documented contract is
+            // clampToOldestAlive + re-read, which is also what makes a consumer
+            // that starts a lap behind self-heal instead of spinning forever.
+            // Bail: once the producer exits (iteration end) nothing more will
+            // ever be published, so a MISS that persists for 10 ms means it is
+            // gone — bail out, or JMH's preTearDown barrier would hang forever.
+            // A live producer publishes every ~30 ns, so the bail never triggers
+            // mid-iteration. The fed path (single read) is unaffected, and the
+            // time check runs every 1024 spins to keep reaction latency tight.
             long spins = 0;
             long start = System.nanoTime();
             while ((n = ring.read(c.cursor, scratch)) < 0) {
+                if (n == SpmcOffHeapRing.GAP_LAPPED) {
+                    c.cursor = ring.clampToOldestAlive(c.cursor);
+                    spins = 0;
+                    continue;
+                }
                 if (((++spins & 0x3FF) == 0) && (System.nanoTime() - start) > 10_000_000L) {
                     return -1; // iteration over: one phantom op per thread per phase
                 }

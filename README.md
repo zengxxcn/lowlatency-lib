@@ -80,7 +80,11 @@ consumers, 32 B payload, capacity 1024) using a manually-driven
 single-producer `RingBuffer` with per-consumer gating sequences.
 `LadderBenchmarks` repeats the same comparison with a typed variable-depth FX
 price ladder (`TestPriceLadder`, 88..256 B actual, 256 B worst case, capacity
-1024, rings sized `(1024, MAX_ENCODED)`): SPSC via the generic
+1024, rings sized `(1024, MAX_ENCODED)`): SPMC via the typed
+`write(EventTranslator, view)` / `read(long, reuse)` overloads (producer
+translates straight into the slot through a slot-bound view; the consumer reads
+through the ring's snapshot read, which copies the payload out before decoding
+so a lapped producer cannot tear the view), SPSC via the generic
 flyweight overloads, Disruptor via pre-wrapped per-slot views, and heap
 snapshots for the blocking/linked baselines.
 
@@ -108,7 +112,9 @@ Latest ladder numbers (typed variable-depth payload; 1 fork except (§), 3 forks
 |---|---|---|---|
 | `spscLadder1p1c` | 29.7M | 14.8M | 14.8M |
 | `disruptorLadder1p1c` | 65.7M | 32.8M | 32.8M |
+| `spmcLadder1p1c` | 47.6M | 23.8M | 23.8M |
 | `disruptorLadder1p3c` | 49.9M | 37.4M | 12.5M |
+| `spmcLadder1p3c` | 28.0M | 12.4M | 15.6M |
 | `blockingLadder1p3c` (ArrayBlockingQueue) | 12.3M | 6.1M | 6.1M |
 | `clqLadder1p3c` (ConcurrentLinkedQueue) | 14.1M | 7.0M | 7.0M |
 
