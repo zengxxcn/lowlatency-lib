@@ -335,7 +335,7 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         if (size < 0 || size > maxPayload) {
             throw new IllegalStateException("corrupt slot size " + size);
         }
-        OffHeapRingSupport.copyToBuffer(buffer, base + OFF_DATA, snapshot, size);
+        OffHeapRingSupport.copyToBufferStart(buffer, base + OFF_DATA, snapshot, size);
         if (OffHeapRingSupport.getVersionAcquire(buffer, base) != v0) {
             return MISS;
         }

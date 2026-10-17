@@ -82,6 +82,37 @@ class SpmcFlyweightApiTest {
     }
 
     @Test
+    void consecutiveTypedReadsEachStartAtSnapshotZero() {
+        // The ring-owned snapshot is reused, so every typed read must copy to
+        // offset 0. A read that appends at the buffer's position would stack
+        // copies (stale bytes decoded, then IndexOutOfBounds once the sum of
+        // payload sizes passes maxPayload).
+        try (SpmcOffHeapRing ring = new SpmcOffHeapRing(8, TestPriceLadder.MAX_ENCODED)) {
+            TestPriceLadder view = new TestPriceLadder();
+            TestPriceLadder reuse = new TestPriceLadder();
+            for (int i = 0; i < 6; i++) {
+                final int depth = TestPriceLadder.MAX_DEPTH;
+                final long eventId = 7000L + i;
+                ring.write((TestPriceLadder e, long seq) -> {
+                    e.setSymbol("EURUSD");
+                    e.setMarket("LMAX");
+                    e.setEventId(eventId);
+                    e.setTimestampNs(1_720_000_000_000_000_000L);
+                    e.setDepth(depth);
+                    for (int lvl = 0; lvl < depth; lvl++) {
+                        e.setLevel(lvl, 10_800L + lvl, 10_810L + lvl, 1_000_000L);
+                    }
+                }, view);
+                int n = ring.read(i, reuse);
+                assertEquals(TestPriceLadder.HEADER + depth * TestPriceLadder.ENTRY, n);
+                assertEquals(eventId, reuse.eventId());
+                assertEquals(depth, reuse.depth());
+                assertEquals(10_800L + depth - 1, reuse.levelBid(depth - 1));
+            }
+        }
+    }
+
+    @Test
     void missLeavesReuseUntouched() {
         try (SpmcOffHeapRing ring = new SpmcOffHeapRing(8)) {
             TestOrderEvent reuse = new TestOrderEvent();

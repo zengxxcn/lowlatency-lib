@@ -196,6 +196,16 @@ final class OffHeapRingSupport {
         dst.position(pos + len);
     }
 
+    /**
+     * Copies a payload to {@code dst} offset 0 and leaves the position alone —
+     * for ring-owned reuse buffers that are always addressed from the start
+     * (a position-relative copy would stack successive payloads and eventually
+     * run off the end).
+     */
+    static void copyToBufferStart(ByteBuffer buf, int dataOffset, ByteBuffer dst, int len) {
+        dst.put(0, buf, dataOffset, len);
+    }
+
     /** Best-effort direct-buffer free; falls back to GC if internals are inaccessible. */
     static void free(ByteBuffer buf) {
         try {
