@@ -21,10 +21,13 @@ import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
  * {@link #clampToOldestAlive} and re-read). Reads are pure loads — no stores — and re-read the version
  * after the copy so an overlapping write degrades to a miss, never a tear.
  *
- * <p>Typed ({@link Flyweight}) reads copy into a ring-owned heap snapshot
- * (see {@link #read(long, Flyweight)}): the caller wraps the view over frozen
- * bytes, so decode cannot tear against an overwriting producer. The snapshot
- * is reused across calls, so decode eagerly before the next typed read.
+ * <p>Typed ({@link Flyweight}) reads copy into the view's own
+ * {@link Flyweight#snapshotBuffer()} (see {@link #read(long, Flyweight)}): the
+ * caller wraps the view over frozen bytes, so decode cannot tear against an
+ * overwriting producer. Each consumer supplies its own view — and so its own
+ * snapshot buffer — because a buffer shared between consumer threads
+ * serialises them on the same cache lines. A snapshot is reused across reads,
+ * so decode eagerly before the next typed read on that view.
  * This ring deliberately offers no slot-aliased typed read: a view over live
  * slot bytes can be invalidated by the producer mid-decode.
  *
@@ -51,7 +54,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
 
     private final ByteBuffer buffer;
     private final ByteBuffer rawOwner;
-    private final ByteBuffer snapshot;
     private final int capacity;
     private final int maxPayload;
     private final int stride;
@@ -69,7 +71,6 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         OffHeapRingSupport.Region region = OffHeapRingSupport.allocate(capacity, maxPayload);
         this.buffer = region.slice;
         this.rawOwner = region.raw;
-        this.snapshot = ByteBuffer.allocate(maxPayload);
         this.capacity = capacity;
         this.maxPayload = maxPayload;
         this.stride = OffHeapRingSupport.slotStride(maxPayload);
@@ -307,19 +308,20 @@ public final class SpmcOffHeapRing implements AutoCloseable {
     }
 
     /**
-     * Typed read: copies the slot payload into this ring's internal
-     * {@code maxPayload}-sized heap snapshot, revalidates the version after
-     * the copy, then wraps {@code reuse} over the validated snapshot and
-     * returns the size. The snapshot bytes are frozen, so decoding cannot
-     * tear against an overwriting producer — the guarantee a slot-aliased
-     * view cannot offer.
+     * Typed read: copies the slot payload into {@code reuse}'s own
+     * {@link Flyweight#snapshotBuffer()}, revalidates the version after the
+     * copy, then wraps {@code reuse} over that frozen buffer and returns the
+     * size. The snapshot bytes are frozen, so decoding cannot tear against an
+     * overwriting producer — the guarantee a slot-aliased view cannot offer.
      *
      * <p>Returns {@link #MISS} (writer active, not yet published, or torn —
      * {@code reuse} left untouched) or {@link #GAP_LAPPED} (consumer lapped;
-     * clamp with {@code clampToOldestAlive} and re-read). The snapshot is
-     * ring-owned and reused across calls, so {@code reuse} is valid only
-     * until the next typed read on this ring: decode eagerly (getters
-     * before the next {@code read}) or copy the fields out.
+     * clamp with {@code clampToOldestAlive} and re-read). The snapshot buffer
+     * is owned and reused by {@code reuse}, so the view is valid only until
+     * the next typed read on that same view: decode eagerly (getters before
+     * the next {@code read}) or copy the fields out. Multicast consumers must
+     * each pass their own view — one view shared across threads means one
+     * shared snapshot, and the consumers serialise on its cache lines.
      */
     public <E extends Flyweight> int read(long blockIndex, E reuse) {
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
@@ -335,11 +337,16 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         if (size < 0 || size > maxPayload) {
             throw new IllegalStateException("corrupt slot size " + size);
         }
-        OffHeapRingSupport.copyToBufferStart(buffer, base + OFF_DATA, snapshot, size);
+        ByteBuffer snap = reuse.snapshotBuffer();
+        if (snap.capacity() < size) {
+            throw new IllegalStateException("snapshot buffer holds " + snap.capacity()
+                    + " bytes, payload is " + size + " (needs maxEncodedLength())");
+        }
+        OffHeapRingSupport.copyToBufferStart(buffer, base + OFF_DATA, snap, size);
         if (OffHeapRingSupport.getVersionAcquire(buffer, base) != v0) {
             return MISS;
         }
-        reuse.wrap(snapshot, 0, size);
+        reuse.wrap(snap, 0, size);
         return size;
     }
 

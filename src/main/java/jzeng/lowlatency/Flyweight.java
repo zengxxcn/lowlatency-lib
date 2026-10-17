@@ -18,6 +18,19 @@ public interface Flyweight {
     void wrap(ByteBuffer buffer, int offset, int length);
 
     /**
+     * Buffer a ring may copy a payload into before wrapping this view — the
+     * decode target for reads that must not alias a slot they cannot pin (a
+     * multicast ring that may be lapped). Written at offset 0 and reused
+     * across reads, so the view a read returns is valid only until the next
+     * read on this same instance.
+     *
+     * <p>Own it per consumer: buffers shared between consumer threads contend
+     * on the same cache lines. Must hold at least {@link #maxEncodedLength()}
+     * bytes and, like the view itself, is not thread-safe.
+     */
+    ByteBuffer snapshotBuffer();
+
+    /**
      * Worst-case encoded size for this type. Sizes the ring, e.g.
      * {@code new SpmcOffHeapRing(capacity, MyEvent.MAX_ENCODED)}.
      */

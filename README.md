@@ -53,8 +53,10 @@ SLOT s (stride B), base = 64 + s*stride:
     torn by a concurrent publish reads as `-1`, retried by the caller, never spun internally.
 - Payload size is per-ring: `new SpmcOffHeapRing(capacity)` defaults to 64 bytes max;
   `new SpmcOffHeapRing(capacity, maxPayload)` sizes up to the message type's worst case.
-  `Flyweight` types declare `maxEncodedLength()` (sizes the ring) and `encodedLength()`
-  (actual bytes per message, checked per write); oversize → `IllegalArgumentException`.
+  `Flyweight` types declare `maxEncodedLength()` (sizes the ring), `encodedLength()`
+  (actual bytes per message, checked per write) and `snapshotBuffer()` (the view's own
+  decode target for reads that cannot alias a slot — one per consumer thread);
+  oversize → `IllegalArgumentException`.
   Rings are `AutoCloseable`.
 
 ## Build / test / benchmark
@@ -83,8 +85,10 @@ price ladder (`TestPriceLadder`, 88..256 B actual, 256 B worst case, capacity
 1024, rings sized `(1024, MAX_ENCODED)`): SPMC via the typed
 `write(EventTranslator, view)` / `read(long, reuse)` overloads (producer
 translates straight into the slot through a slot-bound view; the consumer reads
-through the ring's snapshot read, which copies the payload out before decoding
-so a lapped producer cannot tear the view), SPSC via the generic
+through the snapshot read, which copies the payload into the view's own
+`Flyweight.snapshotBuffer()` before decoding so a lapped producer cannot tear
+the view — one buffer per consumer, or they serialise on its cache lines),
+SPSC via the generic
 flyweight overloads, Disruptor via pre-wrapped per-slot views, and heap
 snapshots for the blocking/linked baselines.
 
@@ -112,9 +116,9 @@ Latest ladder numbers (typed variable-depth payload; 1 fork except (§), 3 forks
 |---|---|---|---|
 | `spscLadder1p1c` | 29.7M | 14.8M | 14.8M |
 | `disruptorLadder1p1c` | 65.7M | 32.8M | 32.8M |
-| `spmcLadder1p1c` | 47.6M | 23.8M | 23.8M |
+| `spmcLadder1p1c` | 50.4M | 25.2M | 25.3M |
 | `disruptorLadder1p3c` | 49.9M | 37.4M | 12.5M |
-| `spmcLadder1p3c` | 28.0M | 12.4M | 15.6M |
+| `spmcLadder1p3c` | 54.9M | 41.2M | 13.7M |
 | `blockingLadder1p3c` (ArrayBlockingQueue) | 12.3M | 6.1M | 6.1M |
 | `clqLadder1p3c` (ConcurrentLinkedQueue) | 14.1M | 7.0M | 7.0M |
 

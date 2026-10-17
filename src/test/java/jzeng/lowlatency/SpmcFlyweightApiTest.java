@@ -10,9 +10,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Typed SPMC read/write via the restored Flyweight API. The typed read copies
- * into a ring-owned snapshot and revalidates after the copy, so decode cannot
- * tear against an overwriting producer — the regression the slot-aliased
- * zero-copy read could not guard against.
+ * into the view's own snapshot buffer and revalidates after the copy, so decode
+ * cannot tear against an overwriting producer — the regression the slot-aliased
+ * zero-copy read could not guard against — and multicast consumers cannot clobber
+ * each other's decode target.
  */
 class SpmcFlyweightApiTest {
 
@@ -83,7 +84,7 @@ class SpmcFlyweightApiTest {
 
     @Test
     void consecutiveTypedReadsEachStartAtSnapshotZero() {
-        // The ring-owned snapshot is reused, so every typed read must copy to
+        // The view's snapshot is reused, so every typed read must copy to
         // offset 0. A read that appends at the buffer's position would stack
         // copies (stale bytes decoded, then IndexOutOfBounds once the sum of
         // payload sizes passes maxPayload).
@@ -109,6 +110,82 @@ class SpmcFlyweightApiTest {
                 assertEquals(depth, reuse.depth());
                 assertEquals(10_800L + depth - 1, reuse.levelBid(depth - 1));
             }
+        }
+    }
+
+    @Test
+    void multicastViewsDecodeIndependently() {
+        // Two consumers, two flyweights: each owns its own snapshot, so one
+        // consumer's read cannot overwrite the bytes the other is decoding.
+        // With a shared ring-owned snapshot this fails — view A would decode
+        // consumer B's message.
+        try (SpmcOffHeapRing ring = new SpmcOffHeapRing(8, TestPriceLadder.MAX_ENCODED)) {
+            TestPriceLadder producer = new TestPriceLadder();
+            TestPriceLadder consumerA = new TestPriceLadder();
+            TestPriceLadder consumerB = new TestPriceLadder();
+            ring.write(ladderWithId(4001L), producer);
+            ring.read(0, consumerA);
+            assertEquals(4001L, consumerA.eventId());
+            ring.write(ladderWithId(4002L), producer);
+            ring.read(1, consumerB);
+            assertEquals(4002L, consumerB.eventId());
+            assertNotSame(consumerA.snapshotBuffer(), consumerB.snapshotBuffer());
+            assertEquals(4001L, consumerA.eventId(), "consumer A's view was clobbered by consumer B");
+        }
+    }
+
+    @Test
+    void undersizedSnapshotBufferRejected() {
+        try (SpmcOffHeapRing ring = new SpmcOffHeapRing(8)) {
+            TestOrderEvent view = new TestOrderEvent();
+            ring.write((TestOrderEvent e, long seq) -> e.set(1L, 1, 1L), view);
+            TinySnapshotEvent reuse = new TinySnapshotEvent();
+            IllegalStateException e = assertThrows(IllegalStateException.class, () -> ring.read(0, reuse));
+            assertTrue(e.getMessage().contains("snapshot"), e.getMessage());
+        }
+    }
+
+    private static EventTranslator<TestPriceLadder> ladderWithId(long eventId) {
+        return (TestPriceLadder e, long seq) -> {
+            e.setSymbol("EURUSD");
+            e.setMarket("LMAX");
+            e.setEventId(eventId);
+            e.setTimestampNs(1_720_000_000_000_000_000L);
+            e.setDepth(2);
+            e.setLevel(0, 10810L, 10812L, 1_000_000L);
+            e.setLevel(1, 10809L, 10813L, 1_500_000L);
+        };
+    }
+
+    /** A flyweight whose snapshot buffer is too small for its own payload. */
+    private static final class TinySnapshotEvent implements Flyweight {
+        private final ByteBuffer snapshot = ByteBuffer.allocate(4);
+        private ByteBuffer buffer;
+        private int base;
+
+        @Override
+        public void wrap(ByteBuffer buffer, int offset, int length) {
+            this.buffer = buffer;
+            this.base = offset;
+        }
+
+        @Override
+        public ByteBuffer snapshotBuffer() {
+            return snapshot;
+        }
+
+        @Override
+        public int maxEncodedLength() {
+            return TestOrderEvent.ENCODED;
+        }
+
+        @Override
+        public int encodedLength() {
+            return TestOrderEvent.ENCODED;
+        }
+
+        public long orderId() {
+            return buffer.getLong(base);
         }
     }
 

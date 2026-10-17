@@ -10,6 +10,7 @@ final class TestOrderEvent implements Flyweight {
 
     static final int ENCODED = 20;
 
+    private final ByteBuffer snapshot = ByteBuffer.allocate(ENCODED);
     private ByteBuffer buffer;
     private int base;
 
@@ -17,6 +18,11 @@ final class TestOrderEvent implements Flyweight {
     public void wrap(ByteBuffer buffer, int offset, int length) {
         this.buffer = buffer;
         this.base = offset;
+    }
+
+    @Override
+    public ByteBuffer snapshotBuffer() {
+        return snapshot;
     }
 
     @Override

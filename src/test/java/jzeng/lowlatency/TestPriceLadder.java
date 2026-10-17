@@ -26,6 +26,7 @@ final class TestPriceLadder implements Flyweight {
     static final int ENTRY = 24;
     static final int MAX_ENCODED = HEADER + MAX_DEPTH * ENTRY;
 
+    private final ByteBuffer snapshot = ByteBuffer.allocate(MAX_ENCODED);
     private ByteBuffer buffer;
     private int base;
     private int depth;
@@ -34,6 +35,11 @@ final class TestPriceLadder implements Flyweight {
     public void wrap(ByteBuffer buffer, int offset, int length) {
         this.buffer = buffer;
         this.base = offset;
+    }
+
+    @Override
+    public ByteBuffer snapshotBuffer() {
+        return snapshot;
     }
 
     @Override
