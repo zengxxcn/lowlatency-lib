@@ -281,6 +281,51 @@ public class RingBenchmarks {
         return n;
     }
 
+    // ---------------- SPSC conflating 1P x 1C ----------------
+    // Same shape as spsc1p1c, but the producer never blocks: it overwrites the
+    // oldest live slot once the consumer is more than maxLag (default CAPACITY-1)
+    // behind. In step it is an ordered stream; a lap is reported as LAPPED and the
+    // consumer conflates to the newest message.
+
+    @State(Scope.Group)
+    public static class SpscConflatingState {
+        final SpscConflatingRing ring = new SpscConflatingRing(CAPACITY);
+    }
+
+    @Benchmark
+    @Group("spscConflating1p1c")
+    @GroupThreads(1)
+    public void spscConflatingProducer(SpscConflatingState g) {
+        g.ring.write(PAYLOAD, (buf, off, n) -> {
+            buf.put(off, TEMPLATE, 0, n);
+        });
+    }
+
+    @Benchmark
+    @Group("spscConflating1p1c")
+    @GroupThreads(1)
+    public int spscConflatingConsumer(SpscConflatingState g, Cursor c, Scratch s) {
+        int n;
+        long spins = 0;
+        long start = 0;
+        while ((n = g.ring.read(c.cursor, s.buf)) < 0) {
+            if (n == SpscConflatingRing.LAPPED) {
+                // Conflate: jump to the newest published message. Lag 1 is always
+                // within maxLag, so the re-read makes progress.
+                c.cursor = g.ring.producerSequence() - 1;
+                continue;
+            }
+            if (start == 0) {
+                start = System.nanoTime();
+            }
+            if (((++spins & 0x3FF) == 0) && (System.nanoTime() - start) > 10_000_000L) {
+                return -1; // iteration over: producer gone
+            }
+        }
+        c.cursor++;
+        return n;
+    }
+
     // ---------------- Agrona OneToOneRingBuffer 1P x 1C ----------------
     // Same test shape as spsc1p1c (single producer, single consumer, 32 B
     // payload) backed by Agrona's OneToOneRingBuffer over off-heap memory.

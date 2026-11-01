@@ -43,6 +43,19 @@ SLOT s (stride B), base = 64 + s*stride:
     retrying the same message is safe. Exactly-once holds with no external
     flow control needed (though keeping the producer roughly paced avoids
     wasted ERROR spins).
+- **SPSC conflating (`SpscConflatingRing`)** — 1 producer × 1 consumer overwrite
+  ring: ordered, exactly-once delivery while the consumer keeps up, conflation
+  instead of backpressure when it falls behind.
+  - The producer never blocks: copy the payload, store the packed size, then
+    release the single `published` counter. No per-slot version, no CAS, no
+    fetch-add; a reader only loads `published`, its slot's size word, and
+    rechecks `published` after the copy.
+  - `read(cursor, dst)` returns `MISS` (-1) when nothing newer exists, or
+    `LAPPED` (-2) when the consumer is more than `maxLag` behind; the caller
+    then jumps to `producerSequence() - 1` and re-reads the newest message.
+  - `maxLag = capacity - 1` (default) conflates only at the overwrite boundary;
+    `maxLag = 1` keeps only the newest value. Typed reads copy into the view's
+    own `snapshotBuffer()` before decoding, like the SPMC typed read.
 - **Conflated (`ConflatedValue`)** — 1 producer × N consumers last-value register
   for when the producer is faster than the consumer and only the newest value matters.
   - Depth-1 seqlock slot (even = stable, odd = writer active): `publish`
@@ -95,6 +108,10 @@ the view — one buffer per consumer, or they serialise on its cache lines),
 SPSC via the generic
 flyweight overloads, Disruptor via pre-wrapped per-slot views, and heap
 snapshots for the blocking/linked baselines.
+`spscConflating1p1c` / `spscConflatingLadder1p1c` use the conflating SPSC ring
+(`maxLag = capacity - 1`): the producer never blocks, and a consumer more than
+`maxLag` behind jumps to the newest message, so these rows are not
+loss-equivalent to the lossless `spsc*` groups.
 
 > **Machine profile (all tables below):** bare-metal AMD Ryzen 7 5800, 8 cores /
 > 16 threads, 32 MiB L3 (256 KiB L1d+L1i / 4 MiB L2 per core), 16 GiB RAM,
@@ -108,6 +125,7 @@ Latest ring numbers (ops/s, group totals):
 | `disruptor1p1c` | 175.0M | 87.5M | 87.5M |
 | `spmc1p1c` | 111.9M | 55.9M | 55.9M |
 | `spsc1p1c` | 87.7M | 43.8M | 43.8M |
+| `spscConflating1p1c` (lossy when lapped) | 129.0M | 55.1M | 73.9M |
 | `agronaSpsc1p1c` (Agrona `OneToOneRingBuffer`) | 97.1M | 48.5M | 48.5M |
 | `disruptor1p3c` | 129.1M | 96.8M | 32.3M |
 | `spmc1p3c` | 137.5M | 103.1M | 34.4M |
@@ -119,6 +137,7 @@ Latest ladder numbers (typed variable-depth payload; 1 fork):
 | Benchmark | Group total | Consumers (total) | Producer |
 |---|---|---|---|
 | `spscLadder1p1c` | 53.5M | 26.7M | 26.7M |
+| `spscConflatingLadder1p1c` (lossy when lapped) | 59.8M | 29.7M | 30.2M |
 | `disruptorLadder1p1c` | 61.7M | 30.8M | 30.8M |
 | `spmcLadder1p1c` | 47.5M | 23.7M | 23.7M |
 | `disruptorLadder1p3c` | 50.3M | 37.8M | 12.6M |
@@ -197,6 +216,17 @@ if (ring.write(payload) != SpscWriteResult.SUCCESS) { /* back off, retry */ }
 // ---- SPSC consumer thread: exactly-once, cursor advances only on hit ----
 int n = ring.read(cursor, dst);                   // size, or -1 = not yet published
 if (n < 0) { /* wait/park, retry same cursor */ }
+else { onMessage(dst, n); cursor++; }
+```
+
+```java
+// ---- SPSC conflating consumer: behind by > maxLag means jump to the newest ----
+int n = ring.read(cursor, dst);
+if (n == SpscConflatingRing.LAPPED) {
+    cursor = ring.producerSequence() - 1;         // conflate: skip the backlog...
+    continue;                                     // ...and re-read the newest
+}
+if (n < 0) { /* MISS: nothing published yet */ }
 else { onMessage(dst, n); cursor++; }
 ```
 

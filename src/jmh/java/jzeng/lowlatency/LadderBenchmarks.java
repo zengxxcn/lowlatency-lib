@@ -204,6 +204,53 @@ public class LadderBenchmarks {
         return sum;
     }
 
+    // ---------------- SPSC conflating ladder 1P x 1C ----------------
+    // Typed path end to end, same shape as spscLadder1p1c but with the conflating
+    // ring: the producer translates into the slot through a slot-bound view; the
+    // consumer copies into its own snapshot before decoding. A lap is LAPPED, and
+    // the consumer conflates to the newest message.
+
+    @State(Scope.Group)
+    public static class SpscConflatingLadderState {
+        final SpscConflatingRing ring = new SpscConflatingRing(CAPACITY, MAX);
+    }
+
+    @Benchmark
+    @Group("spscConflatingLadder1p1c")
+    @GroupThreads(1)
+    public void spscConflatingLadderProducer(SpscConflatingLadderState g, LadderView p) {
+        g.ring.write(LadderBenchmarks::fillLadder, p.ladder);
+    }
+
+    @Benchmark
+    @Group("spscConflatingLadder1p1c")
+    @GroupThreads(1)
+    public int spscConflatingLadderConsumer(SpscConflatingLadderState g, Cursor c, LadderView v) {
+        return spinTypedConflatingRead(g.ring, c, v.ladder);
+    }
+
+    private static int spinTypedConflatingRead(
+            SpscConflatingRing ring, Cursor c, TestPriceLadder reuse) {
+        int n;
+        long spins = 0;
+        long start = 0;
+        while ((n = ring.read(c.cursor, reuse)) < 0) {
+            if (n == SpscConflatingRing.LAPPED) {
+                c.cursor = ring.producerSequence() - 1;
+                continue;
+            }
+            if (start == 0) {
+                start = System.nanoTime();
+            }
+            if (((++spins & 0x3FF) == 0) && (System.nanoTime() - start) > 10_000_000L) {
+                return -1; // iteration over: producer gone
+            }
+        }
+        int sum = ladderChecksum(reuse, n);
+        c.cursor++;
+        return sum;
+    }
+
     // ---------------- Disruptor ladder 1P x 1C / 1P x 3C ----------------
     // Same shape, backed by LMAX Disruptor's single-producer RingBuffer used
     // manually. Each event preallocates a 256 B payload; the producer fills it
