@@ -179,6 +179,16 @@ final class OffHeapRingSupport {
         return (long) LONG_HANDLE.getAndAdd(buf, 0, 1L);
     }
 
+    /** Acquire-loads the header sequence counter at offset 0 (next-to-publish). */
+    static long getSequenceAcquire(ByteBuffer buf) {
+        return (long) LONG_HANDLE.getAcquire(buf, 0);
+    }
+
+    /** Release-stores the header sequence counter at offset 0. */
+    static void setSequenceRelease(ByteBuffer buf, long sequence) {
+        LONG_HANDLE.setRelease(buf, 0, sequence);
+    }
+
     // Bulk copies: absolute bulk get/put are intrinsified to Unsafe.copyMemory
     // (single bounds check, no per-byte work, no allocation). The Buffer variants
     // use absolute offsets on both sides so neither buffer's position is touched
