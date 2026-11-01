@@ -73,6 +73,10 @@ java -cp "$CP" jzeng.lowlatency.LadderBenchmarks      # typed-ladder benchmarks
 java -cp "$CP" jzeng.lowlatency.ConflatedBenchmarks   # conflation benchmarks
 ```
 
+Each benchmark's `main()` runs JMH with `-f 1 -wi 2 -i 3` (one fork, two warmup
+and three measurement iterations at 10 s each), so the tables below reproduce
+with the commands above.
+
 JMH groups cover 1P×1C, 1P×3C plus SPSC against
 `ArrayBlockingQueue` and `ConcurrentLinkedQueue` baselines, plus
 `conflated1p1c` / `conflated1p3c` against an `AtomicReference` baseline.
@@ -101,37 +105,37 @@ Latest ring numbers (ops/s, group totals):
 
 | Benchmark | Group total | Consumers (total) | Producer |
 |---|---|---|---|
-| `disruptor1p1c` | 131.1M | 65.6M | 65.6M |
-| `spmc1p1c` | 107.9M | 53.9M | 53.9M |
-| `spsc1p1c` | 101.6M | 50.8M | 50.8M |
-| `agronaSpsc1p1c` (Agrona `OneToOneRingBuffer`) | 60.5M | 30.3M | 30.3M |
-| `disruptor1p3c` | 135.9M | 101.9M | 34.0M |
-| `spmc1p3c` | 143.8M | 107.9M | 35.9M |
-| `blocking1p3c` (ArrayBlockingQueue) | 37.0M | 18.5M | 18.5M |
-| `clq1p3c` (ConcurrentLinkedQueue) | 5.7M | 2.6M | 3.0M |
+| `disruptor1p1c` | 175.0M | 87.5M | 87.5M |
+| `spmc1p1c` | 111.9M | 55.9M | 55.9M |
+| `spsc1p1c` | 87.7M | 43.8M | 43.8M |
+| `agronaSpsc1p1c` (Agrona `OneToOneRingBuffer`) | 97.1M | 48.5M | 48.5M |
+| `disruptor1p3c` | 129.1M | 96.8M | 32.3M |
+| `spmc1p3c` | 137.5M | 103.1M | 34.4M |
+| `blocking1p3c` (ArrayBlockingQueue) | 35.6M | 17.8M | 17.8M |
+| `clq1p3c` (ConcurrentLinkedQueue) | 14.6M | 7.1M | 7.6M |
 
-Latest ladder numbers (typed variable-depth payload; 1 fork except (§), 3 forks):
+Latest ladder numbers (typed variable-depth payload; 1 fork):
 
 | Benchmark | Group total | Consumers (total) | Producer |
 |---|---|---|---|
-| `spscLadder1p1c` | 29.7M | 14.8M | 14.8M |
-| `disruptorLadder1p1c` | 65.7M | 32.8M | 32.8M |
-| `spmcLadder1p1c` | 50.4M | 25.2M | 25.3M |
-| `disruptorLadder1p3c` | 49.9M | 37.4M | 12.5M |
-| `spmcLadder1p3c` | 54.9M | 41.2M | 13.7M |
+| `spscLadder1p1c` | 53.5M | 26.7M | 26.7M |
+| `disruptorLadder1p1c` | 61.7M | 30.8M | 30.8M |
+| `spmcLadder1p1c` | 47.5M | 23.7M | 23.7M |
+| `disruptorLadder1p3c` | 50.3M | 37.8M | 12.6M |
+| `spmcLadder1p3c` | 52.8M | 39.6M | 13.2M |
 | `blockingLadder1p3c` (ArrayBlockingQueue) | 12.3M | 6.1M | 6.1M |
-| `clqLadder1p3c` (ConcurrentLinkedQueue) | 14.1M | 7.0M | 7.0M |
+| `clqLadder1p3c` (ConcurrentLinkedQueue) | 14.0M | 7.0M | 7.0M |
 
 Latest conflation numbers (`ConflatedBenchmarks`, 32 B payload; same protocol, 1 fork):
 
 | Benchmark | Group total | Consumers (total) | Producer (publish rate) |
 |---|---|---|---|
-| `conflated1p1c` | 173.5M | 136.8M | 36.7M |
-| `atomicref1p1c` (`AtomicReference`) | 65.5M | 30.4M | 35.1M |
-| `volatile1p1c` (plain volatile holder) | 84.0M | 48.9M | 35.1M |
-| `conflated1p3c` | 376.1M | 365.5M | 10.6M |
-| `atomicref1p3c` (`AtomicReference`) | 88.3M | 67.1M | 21.1M |
-| `volatile1p3c` (plain volatile holder) | 109.4M | 86.8M | 22.6M |
+| `conflated1p1c` | 33.8M | 16.3M | 17.5M |
+| `atomicref1p1c` (`AtomicReference`) | 72.2M | 37.2M | 35.0M |
+| `volatile1p1c` (plain volatile holder) | 116.1M | 99.7M | 16.3M |
+| `conflated1p3c` | 112.2M | 102.8M | 9.3M |
+| `atomicref1p3c` (`AtomicReference`) | 468.9M | 458.3M | 10.6M |
+| `volatile1p3c` (plain volatile holder) | 102.3M | 78.4M | 23.9M |
 
 > **Harness note:** all consumers (and the SPSC/Disruptor backpressure paths) carry a
 > ~10 ms starvation bail — at iteration end the producer may exit while a consumer waits
@@ -143,12 +147,15 @@ Latest conflation numbers (`ConflatedBenchmarks`, 32 B payload; same protocol, 1
 > **Fairness note (same as the original):** the SPMC ring is *multicast* — each message
 > is counted once *per consumer* — while the baselines are competing-consumers (counted
 > once total). Compare numbers relatively, as with the original histogram.
-> Conflation consumer-side numbers count polls (mostly "no new data"); the publish rate
-> is the comparable figure — 1P×1C publish rates are statistically identical (~35–37M/s
-> across all three), since TLAB allocation makes the baselines' per-publish garbage
-> nearly free with no GC pressure. Error bars are wide (1 fork × 3 iterations); the
-> durable difference is functional — zero allocation and off-heap residence — which only
-> materializes under sustained load where per-publish garbage forces GC pauses.
+> Conflation consumer-side numbers count polls, and the poll rate is not comparable
+> across runs: the consumer settles into one of two stable modes — spinning on
+> "no new data" (high poll counts) when it outruns the producer, or copying every
+> publish (the poll count converges on the publish rate) when it does not. The
+> baselines' consumers only read the sequence, while `ConflatedValue.poll` copies the
+> payload, so their rates are not apples-to-apples. Error bars are wide (1 fork × 3
+> iterations); the durable difference is functional — zero allocation and off-heap
+> residence — which only materializes under sustained load where per-publish garbage
+> forces GC pauses.
 
 ## API sketch
 
