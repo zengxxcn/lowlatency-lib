@@ -2,10 +2,7 @@ package jzeng.lowlatency;
 
 import java.nio.ByteBuffer;
 
-import static jzeng.lowlatency.OffHeapRingSupport.INT_HANDLE;
 import static jzeng.lowlatency.OffHeapRingSupport.OFF_DATA;
-import static jzeng.lowlatency.OffHeapRingSupport.OFF_SIZE;
-import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
 
 /**
  * Single-producer / N-consumer conflated latest-value register, fully off-heap.
@@ -60,9 +57,8 @@ public final class ConflatedValue implements AutoCloseable {
     public void publish(byte[] payload) {
         OffHeapRingSupport.checkPayloadSize(payload.length, maxPayload);
         int v0 = beginPublish();
-        OffHeapRingSupport.setSizeRelease(buffer, BASE, payload.length);
         OffHeapRingSupport.copyFrom(buffer, BASE + OFF_DATA, payload, 0, payload.length);
-        endPublish(v0);
+        endPublish(v0, payload.length);
     }
 
     /** Convenience copy from a {@link ByteBuffer} (consumes {@code remaining()} bytes, allocation-free). */
@@ -70,9 +66,8 @@ public final class ConflatedValue implements AutoCloseable {
         int size = src.remaining();
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
         int v0 = beginPublish();
-        OffHeapRingSupport.setSizeRelease(buffer, BASE, size);
         OffHeapRingSupport.copyFromBuffer(buffer, BASE + OFF_DATA, src, size);
-        endPublish(v0);
+        endPublish(v0, size);
     }
 
     /**
@@ -85,9 +80,8 @@ public final class ConflatedValue implements AutoCloseable {
     public void publish(int size, DirectWriter writer) {
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
         int v0 = beginPublish();
-        OffHeapRingSupport.setSizeRelease(buffer, BASE, size);
         writer.writeTo(buffer, BASE + OFF_DATA, size);
-        endPublish(v0);
+        endPublish(v0, size);
     }
 
     /**
@@ -108,24 +102,24 @@ public final class ConflatedValue implements AutoCloseable {
             size = OffHeapRingSupport.checkedEncodedSize(view, maxPayload);
         } catch (RuntimeException | Error e) {
             // Restore stable (even) so readers don't stall on a dead writer mark.
-            INT_HANDLE.setRelease(buffer, BASE + OFF_VERSION, v0);
+            OffHeapRingSupport.setPackedRelease(buffer, BASE, v0, 0);
             throw e;
         }
-        OffHeapRingSupport.setSizeRelease(buffer, BASE, size);
-        endPublish(v0);
+        endPublish(v0, size);
     }
 
     /** Marks the slot writing (odd); returns the pre-publish version. */
     private int beginPublish() {
-        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, BASE);
+        int v0 = OffHeapRingSupport.versionOf(OffHeapRingSupport.getPackedAcquire(buffer, BASE));
         publishSequence++;
-        INT_HANDLE.setRelease(buffer, BASE + OFF_VERSION, v0 + 1);
+        // Size stays 0 while odd: readers reject on version before using it.
+        OffHeapRingSupport.setPackedRelease(buffer, BASE, v0 + 1, 0);
         return v0;
     }
 
-    /** Marks the slot stable (even). */
-    private void endPublish(int v0) {
-        INT_HANDLE.setRelease(buffer, BASE + OFF_VERSION, v0 + 2);
+    /** Marks the slot stable (even) and publishes size with it. */
+    private void endPublish(int v0, int size) {
+        OffHeapRingSupport.setPackedRelease(buffer, BASE, v0 + 2, size);
     }
 
     /**
@@ -140,16 +134,17 @@ public final class ConflatedValue implements AutoCloseable {
     }
 
     public int poll(ConflatedCursor cursor, byte[] dst, int dstPos) {
-        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, BASE);
+        long packed = OffHeapRingSupport.getPackedAcquire(buffer, BASE);
+        int v0 = OffHeapRingSupport.versionOf(packed);
         if ((v0 & 1) == 1 || v0 == cursor.lastSeenVersion) {
             return -1;
         }
-        int size = OffHeapRingSupport.getSizeAcquire(buffer, BASE);
+        int size = OffHeapRingSupport.sizeOf(packed);
         if (dstPos < 0 || size < 0 || dstPos + size > dst.length) {
             throw new IllegalArgumentException("dst too small for payload of " + size);
         }
         OffHeapRingSupport.copyTo(buffer, BASE + OFF_DATA, dst, dstPos, size);
-        if (OffHeapRingSupport.getVersionAcquire(buffer, BASE) != v0) {
+        if (OffHeapRingSupport.versionOf(OffHeapRingSupport.getPackedAcquire(buffer, BASE)) != v0) {
             return -1; // torn by a concurrent publish; retry later
         }
         cursor.lastSeenVersion = v0;
@@ -157,16 +152,17 @@ public final class ConflatedValue implements AutoCloseable {
     }
 
     public int poll(ConflatedCursor cursor, ByteBuffer dst) {
-        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, BASE);
+        long packed = OffHeapRingSupport.getPackedAcquire(buffer, BASE);
+        int v0 = OffHeapRingSupport.versionOf(packed);
         if ((v0 & 1) == 1 || v0 == cursor.lastSeenVersion) {
             return -1;
         }
-        int size = OffHeapRingSupport.getSizeAcquire(buffer, BASE);
+        int size = OffHeapRingSupport.sizeOf(packed);
         if (dst.remaining() < size) {
             throw new IllegalArgumentException("dst too small for payload of " + size);
         }
         OffHeapRingSupport.copyToBuffer(buffer, BASE + OFF_DATA, dst, size);
-        if (OffHeapRingSupport.getVersionAcquire(buffer, BASE) != v0) {
+        if (OffHeapRingSupport.versionOf(OffHeapRingSupport.getPackedAcquire(buffer, BASE)) != v0) {
             return -1;
         }
         cursor.lastSeenVersion = v0;
@@ -183,16 +179,17 @@ public final class ConflatedValue implements AutoCloseable {
      *         discarded in all -1 cases).
      */
     public <E extends Flyweight> int poll(ConflatedCursor cursor, E reuse) {
-        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, BASE);
+        long packed = OffHeapRingSupport.getPackedAcquire(buffer, BASE);
+        int v0 = OffHeapRingSupport.versionOf(packed);
         if ((v0 & 1) == 1 || v0 == cursor.lastSeenVersion) {
             return -1;
         }
-        int size = OffHeapRingSupport.getSizeAcquire(buffer, BASE);
+        int size = OffHeapRingSupport.sizeOf(packed);
         if (size < 0 || size > maxPayload) {
             throw new IllegalStateException("corrupt slot size " + size);
         }
         reuse.wrap(buffer, BASE + OFF_DATA, size);
-        if (OffHeapRingSupport.getVersionAcquire(buffer, BASE) != v0) {
+        if (OffHeapRingSupport.versionOf(OffHeapRingSupport.getPackedAcquire(buffer, BASE)) != v0) {
             return -1; // torn by a concurrent publish; retry later
         }
         cursor.lastSeenVersion = v0;

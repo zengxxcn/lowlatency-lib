@@ -3,7 +3,6 @@ package jzeng.lowlatency;
 import java.nio.ByteBuffer;
 
 import static jzeng.lowlatency.OffHeapRingSupport.OFF_DATA;
-import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
 
 /**
  * Single-producer / single-consumer exactly-once ring, fully off-heap.
@@ -71,13 +70,12 @@ public final class SpscOffHeapRing implements AutoCloseable {
         // One slotBase + one version load per write: the observed even version
         // is carried in a local and published as version + 1.
         int base = OffHeapRingSupport.slotBase(producer.next, capacity, stride);
-        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        int version = OffHeapRingSupport.versionOf(OffHeapRingSupport.getPackedAcquire(buffer, base));
         if ((version & 1) == 1) {
             return SpscWriteResult.ERROR;
         }
-        OffHeapRingSupport.setSizeRelease(buffer, base, payload.length);
         OffHeapRingSupport.copyFrom(buffer, base + OFF_DATA, payload, 0, payload.length);
-        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
+        OffHeapRingSupport.setPackedRelease(buffer, base, version + 1, payload.length);
         producer.next++;
         return SpscWriteResult.SUCCESS;
     }
@@ -87,13 +85,12 @@ public final class SpscOffHeapRing implements AutoCloseable {
         int size = src.remaining();
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
         int base = OffHeapRingSupport.slotBase(producer.next, capacity, stride);
-        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        int version = OffHeapRingSupport.versionOf(OffHeapRingSupport.getPackedAcquire(buffer, base));
         if ((version & 1) == 1) {
             return SpscWriteResult.ERROR;
         }
-        OffHeapRingSupport.setSizeRelease(buffer, base, size);
         OffHeapRingSupport.copyFromBuffer(buffer, base + OFF_DATA, src, size);
-        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
+        OffHeapRingSupport.setPackedRelease(buffer, base, version + 1, size);
         producer.next++;
         return SpscWriteResult.SUCCESS;
     }
@@ -110,13 +107,12 @@ public final class SpscOffHeapRing implements AutoCloseable {
     public SpscWriteResult write(int size, DirectWriter writer) {
         OffHeapRingSupport.checkPayloadSize(size, maxPayload);
         int base = OffHeapRingSupport.slotBase(producer.next, capacity, stride);
-        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        int version = OffHeapRingSupport.versionOf(OffHeapRingSupport.getPackedAcquire(buffer, base));
         if ((version & 1) == 1) {
             return SpscWriteResult.ERROR;
         }
-        OffHeapRingSupport.setSizeRelease(buffer, base, size);
         writer.writeTo(buffer, base + OFF_DATA, size);
-        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
+        OffHeapRingSupport.setPackedRelease(buffer, base, version + 1, size);
         producer.next++;
         return SpscWriteResult.SUCCESS;
     }
@@ -132,7 +128,7 @@ public final class SpscOffHeapRing implements AutoCloseable {
         OffHeapRingSupport.checkTypeFits(view, maxPayload);
         long seq = producer.next;
         int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
-        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        int version = OffHeapRingSupport.versionOf(OffHeapRingSupport.getPackedAcquire(buffer, base));
         if ((version & 1) == 1) {
             return SpscWriteResult.ERROR;
         }
@@ -141,8 +137,7 @@ public final class SpscOffHeapRing implements AutoCloseable {
         // is still even (free) and `next` unadvanced, so no abort is needed.
         translator.translateTo(view, seq);
         int size = OffHeapRingSupport.checkedEncodedSize(view, maxPayload);
-        OffHeapRingSupport.setSizeRelease(buffer, base, size);
-        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
+        OffHeapRingSupport.setPackedRelease(buffer, base, version + 1, size);
         producer.next++;
         return SpscWriteResult.SUCCESS;
     }
@@ -158,11 +153,12 @@ public final class SpscOffHeapRing implements AutoCloseable {
 
     public int read(long blockIndex, byte[] dst, int dstPos) {
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
-        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        long packed = OffHeapRingSupport.getPackedAcquire(buffer, base);
+        int version = OffHeapRingSupport.versionOf(packed);
         if ((version & 1) == 0) {
             return -1;
         }
-        int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
+        int size = OffHeapRingSupport.sizeOf(packed);
         if (dstPos < 0 || size < 0 || dstPos + size > dst.length) {
             // Slot stays odd (readable): caller can retry with a bigger dst.
             throw new IllegalArgumentException("dst too small for payload of " + size);
@@ -170,23 +166,24 @@ public final class SpscOffHeapRing implements AutoCloseable {
         OffHeapRingSupport.copyTo(buffer, base + OFF_DATA, dst, dstPos, size);
         // Release (odd→even). No CAS: the producer never touches odd slots,
         // so this release is the only writer — the consumer owns the slot.
-        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
+        OffHeapRingSupport.setPackedRelease(buffer, base, version + 1, size);
         return size;
     }
 
     public int read(long blockIndex, ByteBuffer dst) {
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
-        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        long packed = OffHeapRingSupport.getPackedAcquire(buffer, base);
+        int version = OffHeapRingSupport.versionOf(packed);
         if ((version & 1) == 0) {
             return -1;
         }
-        int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
+        int size = OffHeapRingSupport.sizeOf(packed);
         if (dst.remaining() < size) {
             // Slot stays odd (readable): caller can retry with a bigger dst.
             throw new IllegalArgumentException("dst too small for payload of " + size);
         }
         OffHeapRingSupport.copyToBuffer(buffer, base + OFF_DATA, dst, size);
-        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
+        OffHeapRingSupport.setPackedRelease(buffer, base, version + 1, size);
         return size;
     }
 
@@ -199,16 +196,17 @@ public final class SpscOffHeapRing implements AutoCloseable {
      */
     public <E extends Flyweight> int read(long blockIndex, E reuse) {
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
-        int version = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        long packed = OffHeapRingSupport.getPackedAcquire(buffer, base);
+        int version = OffHeapRingSupport.versionOf(packed);
         if ((version & 1) == 0) {
             return -1;
         }
-        int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
+        int size = OffHeapRingSupport.sizeOf(packed);
         if (size < 0 || size > maxPayload) {
             throw new IllegalStateException("corrupt slot size " + size);
         }
         reuse.wrap(buffer, base + OFF_DATA, size);
-        OffHeapRingSupport.setVersionRelease(buffer, base, version + 1);
+        OffHeapRingSupport.setPackedRelease(buffer, base, version + 1, size);
         return size;
     }
 

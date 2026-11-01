@@ -2,9 +2,7 @@ package jzeng.lowlatency;
 
 import java.nio.ByteBuffer;
 
-import static jzeng.lowlatency.OffHeapRingSupport.INT_HANDLE;
 import static jzeng.lowlatency.OffHeapRingSupport.OFF_DATA;
-import static jzeng.lowlatency.OffHeapRingSupport.OFF_VERSION;
 
 /**
  * Single-producer / multiple-consumer multicast ring, fully off-heap.
@@ -145,11 +143,10 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
         int begin = beginVersion(seq);
         // Begin (odd): readers miss while the payload lands.
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin);
-        OffHeapRingSupport.setSizeRelease(buffer, base, payload.length);
+        OffHeapRingSupport.setPackedRelease(buffer, base, begin, 0);
         OffHeapRingSupport.copyFrom(buffer, base + OFF_DATA, payload, 0, payload.length);
-        // End (even): published to all consumers.
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin + 1);
+        // End (even): version and size published together to all consumers.
+        OffHeapRingSupport.setPackedRelease(buffer, base, begin + 1, payload.length);
     }
 
     /** Convenience copy from a {@link ByteBuffer} (consumes {@code remaining()} bytes, allocation-free). */
@@ -159,10 +156,9 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         long seq = OffHeapRingSupport.getAndAddSequence(buffer);
         int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
         int begin = beginVersion(seq);
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin);
-        OffHeapRingSupport.setSizeRelease(buffer, base, size);
+        OffHeapRingSupport.setPackedRelease(buffer, base, begin, 0);
         OffHeapRingSupport.copyFromBuffer(buffer, base + OFF_DATA, src, size);
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin + 1);
+        OffHeapRingSupport.setPackedRelease(buffer, base, begin + 1, size);
     }
 
     /**
@@ -177,11 +173,10 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         long seq = OffHeapRingSupport.getAndAddSequence(buffer);
         int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
         int begin = beginVersion(seq);
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin);
-        OffHeapRingSupport.setSizeRelease(buffer, base, size);
+        OffHeapRingSupport.setPackedRelease(buffer, base, begin, 0);
         writer.writeTo(buffer, base + OFF_DATA, size);
-        // End (even): published to all consumers.
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin + 1);
+        // End (even): version and size published together to all consumers.
+        OffHeapRingSupport.setPackedRelease(buffer, base, begin + 1, size);
     }
 
     /**
@@ -202,20 +197,19 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         long seq = OffHeapRingSupport.getAndAddSequence(buffer);
         int base = OffHeapRingSupport.slotBase(seq, capacity, stride);
         int begin = beginVersion(seq);
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin);
+        OffHeapRingSupport.setPackedRelease(buffer, base, begin, 0);
         view.wrap(buffer, base + OFF_DATA, maxPayload);
         try {
             translator.translateTo(view, seq);
         } catch (RuntimeException | Error e) {
             // Restore the pre-write (even) version: the slot was never
             // published, so it must read as a normal miss, not stuck writing.
-            OffHeapRingSupport.setVersionRelease(buffer, base, begin - 1);
+            OffHeapRingSupport.setPackedRelease(buffer, base, begin - 1, 0);
             throw e;
         }
         int size = OffHeapRingSupport.checkedEncodedSize(view, maxPayload);
-        OffHeapRingSupport.setSizeRelease(buffer, base, size);
-        // End (even): published to all consumers.
-        INT_HANDLE.setRelease(buffer, base + OFF_VERSION, begin + 1);
+        // End (even): version and size published together to all consumers.
+        OffHeapRingSupport.setPackedRelease(buffer, base, begin + 1, size);
     }
 
     /**
@@ -267,7 +261,8 @@ public final class SpmcOffHeapRing implements AutoCloseable {
 
     public int read(long blockIndex, byte[] dst, int dstPos) {
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
-        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        long packed = OffHeapRingSupport.getPackedAcquire(buffer, base);
+        int v0 = OffHeapRingSupport.versionOf(packed);
         if ((v0 & 1) == 1) {
             return MISS;
         }
@@ -275,12 +270,12 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         if (v0 != exp) {
             return classifyGap(v0, exp);
         }
-        int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
+        int size = OffHeapRingSupport.sizeOf(packed);
         if (dstPos < 0 || size < 0 || dstPos + size > dst.length) {
             throw new IllegalArgumentException("dst too small for payload of " + size);
         }
         OffHeapRingSupport.copyTo(buffer, base + OFF_DATA, dst, dstPos, size);
-        if (OffHeapRingSupport.getVersionAcquire(buffer, base) != v0) {
+        if (OffHeapRingSupport.versionOf(OffHeapRingSupport.getPackedAcquire(buffer, base)) != v0) {
             return MISS;
         }
         return size;
@@ -288,7 +283,8 @@ public final class SpmcOffHeapRing implements AutoCloseable {
 
     public int read(long blockIndex, ByteBuffer dst) {
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
-        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        long packed = OffHeapRingSupport.getPackedAcquire(buffer, base);
+        int v0 = OffHeapRingSupport.versionOf(packed);
         if ((v0 & 1) == 1) {
             return MISS;
         }
@@ -296,12 +292,12 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         if (v0 != exp) {
             return classifyGap(v0, exp);
         }
-        int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
+        int size = OffHeapRingSupport.sizeOf(packed);
         if (dst.remaining() < size) {
             throw new IllegalArgumentException("dst too small for payload of " + size);
         }
         OffHeapRingSupport.copyToBuffer(buffer, base + OFF_DATA, dst, size);
-        if (OffHeapRingSupport.getVersionAcquire(buffer, base) != v0) {
+        if (OffHeapRingSupport.versionOf(OffHeapRingSupport.getPackedAcquire(buffer, base)) != v0) {
             return MISS;
         }
         return size;
@@ -325,7 +321,8 @@ public final class SpmcOffHeapRing implements AutoCloseable {
      */
     public <E extends Flyweight> int read(long blockIndex, E reuse) {
         int base = OffHeapRingSupport.slotBase(blockIndex, capacity, stride);
-        int v0 = OffHeapRingSupport.getVersionAcquire(buffer, base);
+        long packed = OffHeapRingSupport.getPackedAcquire(buffer, base);
+        int v0 = OffHeapRingSupport.versionOf(packed);
         if ((v0 & 1) == 1) {
             return MISS;
         }
@@ -333,7 +330,7 @@ public final class SpmcOffHeapRing implements AutoCloseable {
         if (v0 != exp) {
             return classifyGap(v0, exp);
         }
-        int size = OffHeapRingSupport.getSizeAcquire(buffer, base);
+        int size = OffHeapRingSupport.sizeOf(packed);
         if (size < 0 || size > maxPayload) {
             throw new IllegalStateException("corrupt slot size " + size);
         }
@@ -343,7 +340,7 @@ public final class SpmcOffHeapRing implements AutoCloseable {
                     + " bytes, payload is " + size + " (needs maxEncodedLength())");
         }
         OffHeapRingSupport.copyToBufferStart(buffer, base + OFF_DATA, snap, size);
-        if (OffHeapRingSupport.getVersionAcquire(buffer, base) != v0) {
+        if (OffHeapRingSupport.versionOf(OffHeapRingSupport.getPackedAcquire(buffer, base)) != v0) {
             return MISS;
         }
         reuse.wrap(snap, 0, size);

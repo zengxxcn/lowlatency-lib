@@ -12,10 +12,10 @@ import java.nio.ByteOrder;
  * <pre>
  * HEADER (64 B): seq long @0, pad 8..63
  * SLOT s (stride B, stride % 64 == 0): base = 64 + s*stride
- *   +0  version int (even = writing/empty, odd = readable)
- *   +4  size    int (0..maxPayload)
- *   +8  reserved int (padding; formerly the SPSC unread flag)
- *   +12..63     padding
+ *   +0  packed long: version in the low 32 bits, size in the high 32 bits
+ *       (version parity is structure-specific: SPMC and ConflatedValue use
+ *       odd for "writer active", SPSC uses odd for "readable")
+ *   +8..63      padding
  *   +64..       payload (maxPayload B, zero-padded to a 64B multiple)
  * </pre>
  *
@@ -37,12 +37,9 @@ final class OffHeapRingSupport {
     static final int HEADER_SIZE = 64;
     static final int SLOT_STRIDE = 128;
 
-    static final int OFF_VERSION = 0;
-    static final int OFF_SIZE = 4;
+    static final int OFF_PACKED = 0;
     static final int OFF_DATA = 64;
 
-    static final VarHandle INT_HANDLE =
-            MethodHandles.byteBufferViewVarHandle(int[].class, ByteOrder.nativeOrder());
     static final VarHandle LONG_HANDLE =
             MethodHandles.byteBufferViewVarHandle(long[].class, ByteOrder.nativeOrder());
 
@@ -151,20 +148,31 @@ final class OffHeapRingSupport {
         return (int) base;
     }
 
-    static int getVersionAcquire(ByteBuffer buf, int slotBase) {
-        return (int) INT_HANDLE.getAcquire(buf, slotBase + OFF_VERSION);
+    /** Packs a slot version (low 32 bits) and payload size (high 32 bits). */
+    static long pack(int version, int size) {
+        return ((long) size << 32) | (version & 0xFFFFFFFFL);
     }
 
-    static void setVersionRelease(ByteBuffer buf, int slotBase, int version) {
-        INT_HANDLE.setRelease(buf, slotBase + OFF_VERSION, version);
+    static int versionOf(long packed) {
+        return (int) packed;
     }
 
-    static int getSizeAcquire(ByteBuffer buf, int slotBase) {
-        return (int) INT_HANDLE.getAcquire(buf, slotBase + OFF_SIZE);
+    static int sizeOf(long packed) {
+        return (int) (packed >>> 32);
     }
 
-    static void setSizeRelease(ByteBuffer buf, int slotBase, int size) {
-        INT_HANDLE.setRelease(buf, slotBase + OFF_SIZE, size);
+    /**
+     * Acquire-loads version and size as one atomic word. The two fields are
+     * always from the same publish generation (never a version paired with a
+     * size from a different lap).
+     */
+    static long getPackedAcquire(ByteBuffer buf, int slotBase) {
+        return (long) LONG_HANDLE.getAcquire(buf, slotBase + OFF_PACKED);
+    }
+
+    /** Publishes version and size together; this store is the release point. */
+    static void setPackedRelease(ByteBuffer buf, int slotBase, int version, int size) {
+        LONG_HANDLE.setRelease(buf, slotBase + OFF_PACKED, pack(version, size));
     }
 
     static long getAndAddSequence(ByteBuffer buf) {

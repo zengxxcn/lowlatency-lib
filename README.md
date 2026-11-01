@@ -14,10 +14,10 @@ and the region base is 64-aligned, so adjacent slots never share a cache line
 ```
 HEADER (64 B): producer sequence long @0, pad 8..63
 SLOT s (stride B), base = 64 + s*stride:
-  +0  version int   (even = writing/empty, odd = readable)
-  +4  size    int   (0..maxPayload)
-  +8  reserved int (padding)
-  +12..63     padding (cache-line isolation)
+  +0  packed long: version low 32 bits, size high 32 bits
+      (version parity per structure: SPMC/Conflated odd = writer active,
+       SPSC odd = readable)
+  +8..63      padding (cache-line isolation)
   +64..       payload (maxPayload B)
 ```
 
